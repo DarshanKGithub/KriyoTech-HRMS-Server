@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from app.http import Router, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from sqlalchemy import select
 
@@ -6,7 +6,7 @@ from app.core.rbac import get_current_user
 from app.db.database import get_db
 from app.db.models import User, Subscription, Plan, Tenant
 
-router = APIRouter()
+router = Router()
 
 @router.get('/me/subscription')
 def get_my_subscription(
@@ -53,8 +53,8 @@ def get_my_subscription(
             "plan": {
                 "id": plan.id if plan else None,
                 "name": plan.name if plan else "Custom",
-                "billing_cycle": plan.billing_cycle if plan else None,
-                "max_employees": plan.max_employees if plan else None,
+                "billing_cycle": plan.billing_period if plan else None,
+                "max_employees": None,
             }
         }
     }

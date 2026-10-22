@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from app.http import Router, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 from typing import List, Optional
 
@@ -18,7 +18,7 @@ from app.services.workflow_service import (
 from pydantic import BaseModel
 from datetime import datetime
 
-router = APIRouter()
+router = Router()
 
 # --- Schemas ---
 class FormTemplatePublic(BaseModel):

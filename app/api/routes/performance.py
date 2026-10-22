@@ -1,4 +1,5 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from app.services.auth_service import resolve_employee_id
+from app.http import Router, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from datetime import date
 from app.db.database import get_db
@@ -16,7 +17,7 @@ from app.schemas.performance import (
     TrainingCourseCreate, TrainingCourseUpdate, TrainingCoursePublic
 )
 
-router = APIRouter(prefix='/performance', tags=['Performance & KPI'])
+router = Router(prefix='/performance', tags=['Performance & KPI'])
 
 
 # ==================== PERFORMANCE APPRAISAL ENDPOINTS ====================

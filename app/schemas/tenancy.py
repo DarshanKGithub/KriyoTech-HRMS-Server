@@ -8,7 +8,7 @@ class TenantCreate(BaseModel):
     domain: Optional[str] = None
     admin_name: str = Field(min_length=1)
     admin_email: str = Field(min_length=3)
-    admin_password: str = Field(min_length=6)
+    admin_password: str = Field(min_length=8)
 
 
 class TenantUpdate(BaseModel):

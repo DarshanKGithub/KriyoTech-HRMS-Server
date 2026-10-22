@@ -1,8 +1,9 @@
+from app.services.auth_service import resolve_employee_id
 """API routes for Payroll Management (Phase 6)."""
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
-from fastapi.responses import FileResponse
+from app.http import Router, Depends, HTTPException, Query, status
+from app.http import FileResponse
 from sqlalchemy.orm import Session
 
 from app.core.rbac import get_current_user, has_permission, require_permissions
@@ -35,7 +36,7 @@ from app.services.payroll_service import (
     get_salary_history,
     update_salary,
 )
-router = APIRouter()
+router = Router()
 
 
 # --- Salary Components ---
@@ -118,10 +119,10 @@ def get_salary_endpoint(
     """Get salary details for an employee."""
     # Default to requesting user's own salary
     if not employee_id:
-        employee_id = user.id
+        employee_id = resolve_employee_id(user, db)
     
     # Employees can only view their own salary unless Admin/HR
-    if employee_id != user.id and not has_permission(user.role, 'view_payroll'):
+    if employee_id != resolve_employee_id(user, db) and not has_permission(user.role, 'view_payroll'):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail='Cannot view other employees salary')
     
     sal = get_or_create_salary(employee_id, db, tenant_id=user.tenant_id)
@@ -186,11 +187,11 @@ def list_payslips_endpoint(
     db: Session = Depends(get_db),
 ) -> PaginatedPayslips:
     """List payslips with optional filters."""
-    if employee_id and employee_id != user.id and not has_permission(user.role, 'view_payroll'):
+    if employee_id and employee_id != resolve_employee_id(user, db) and not has_permission(user.role, 'view_payroll'):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail='Cannot view other employees payslips')
 
     if not employee_id and not has_permission(user.role, 'view_payroll'):
-        employee_id = user.id
+        employee_id = resolve_employee_id(user, db)
     
     items, total = list_payslips(db, tenant_id=user.tenant_id, employee_id=employee_id, month=month, year=year, page=page, size=size)
     
@@ -229,7 +230,7 @@ def get_payslip_endpoint(
     ps = get_payslip(payslip_id, db, tenant_id=user.tenant_id)
     
     # Employees can only view their own payslips
-    if ps.employee_id != user.id and not has_permission(user.role, 'view_payroll'):
+    if ps.employee_id != resolve_employee_id(user, db) and not has_permission(user.role, 'view_payroll'):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail='Cannot view other employees payslips')
     
     # Get components
@@ -335,7 +336,7 @@ def download_payslip_pdf(
     ps = get_payslip(payslip_id, db, tenant_id=user.tenant_id)
     
     # Permission check: Employee can only download their own, others need Admin/HR role
-    if ps.employee_id != user.id and not has_permission(user.role, 'view_payroll'):
+    if ps.employee_id != resolve_employee_id(user, db) and not has_permission(user.role, 'view_payroll'):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail='Not authorized to download this payslip')
     
     # Get payslip details
@@ -353,7 +354,7 @@ def download_payslip_pdf(
     filename = f"Payslip_{month_name}_{payslip_data['year']}.pdf"
     
     return FileResponse(
-        iter([pdf_bytes]),
+        __import__('io').BytesIO(pdf_bytes),
         media_type='application/pdf',
         filename=filename
     )
@@ -408,10 +409,10 @@ def get_salary_history_endpoint(
     """Get salary history for an employee."""
     # Default to requesting user's own history
     if not employee_id:
-        employee_id = user.id
+        employee_id = resolve_employee_id(user, db)
     
     # Permission check: Employee can only view their own, others need Admin/HR role
-    if employee_id != user.id and not has_permission(user.role, 'view_payroll'):
+    if employee_id != resolve_employee_id(user, db) and not has_permission(user.role, 'view_payroll'):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail='Not authorized to view this salary history')
     
     result = get_salary_history(employee_id, db, page=page, size=size, tenant_id=user.tenant_id)

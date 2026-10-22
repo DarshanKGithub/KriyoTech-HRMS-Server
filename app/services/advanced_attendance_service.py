@@ -2,7 +2,7 @@ from datetime import date
 from typing import Tuple, List, Optional
 from sqlalchemy.orm import Session
 from sqlalchemy import desc
-from fastapi import HTTPException, status
+from app.http import HTTPException, status
 
 from app.db.models import (
     Timesheet,

@@ -1,3 +1,4 @@
+from sqlalchemy import Numeric
 from datetime import datetime, timezone, date, timedelta
 from uuid import uuid4
 
@@ -111,6 +112,8 @@ class Tenant(Base):
     domain: Mapped[str] = mapped_column(String(255), nullable=True, unique=True)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    timezone: Mapped[str] = mapped_column(String(64), nullable=False, default='Asia/Kolkata')
+    working_days_json: Mapped[str] = mapped_column(Text, nullable=False, default='[0,1,2,3,4]')
     subscriptions: Mapped[list['Subscription']] = relationship('Subscription', back_populates='tenant', cascade='all, delete-orphan')
 
 
@@ -571,7 +574,8 @@ class LeaveType(Base):
     tenant_id: Mapped[str] = mapped_column(String(36), ForeignKey('tenants.id'), nullable=True, index=True)
     name: Mapped[str] = mapped_column(String(80), nullable=False)
     description: Mapped[str] = mapped_column(String(255), nullable=True)
-    default_days_per_year: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    default_days_per_year: Mapped[float] = mapped_column(Numeric(6, 2), nullable=False, default=0)
+    is_paid: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
@@ -583,8 +587,8 @@ class LeaveBalance(Base):
     employee_id: Mapped[str] = mapped_column(String(36), ForeignKey('employees.id'), nullable=False, index=True)
     leave_type_id: Mapped[str] = mapped_column(String(36), ForeignKey('leave_types.id'), nullable=False)
     year: Mapped[int] = mapped_column(Integer, nullable=False)
-    granted_days: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    balance_days: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    granted_days: Mapped[float] = mapped_column(Numeric(6, 2), nullable=False, default=0)
+    balance_days: Mapped[float] = mapped_column(Numeric(6, 2), nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
@@ -601,7 +605,7 @@ class LeaveRequest(Base):
     end_date: Mapped[date] = mapped_column(nullable=False)
     session_from: Mapped[str] = mapped_column(String(50), nullable=True, default='Session 1')
     session_to: Mapped[str] = mapped_column(String(50), nullable=True, default='Session 2')
-    days_requested: Mapped[int] = mapped_column(Integer, nullable=False)
+    days_requested: Mapped[float] = mapped_column(Numeric(6, 2), nullable=False)
     reason: Mapped[str] = mapped_column(String(1000), nullable=True)
     contact_details: Mapped[str] = mapped_column(String(500), nullable=True)
     cc_to: Mapped[str] = mapped_column(String(1000), nullable=True)  # JSON array of emails
@@ -668,7 +672,7 @@ class Salary(Base):
     __tablename__ = 'salaries'
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
-    employee_id: Mapped[str] = mapped_column(String(36), ForeignKey('employees.id'), nullable=False, index=True, unique=True)
+    employee_id: Mapped[str] = mapped_column(String(36), ForeignKey('employees.id'), nullable=False, index=True)
     base_salary: Mapped[float] = mapped_column(Numeric(12, 2), nullable=False)
     grade: Mapped[str] = mapped_column(String(50), nullable=True)
     currency: Mapped[str] = mapped_column(String(3), nullable=False, default='INR')
@@ -715,8 +719,8 @@ class Payslip(Base):
     total_deductions: Mapped[float] = mapped_column(Numeric(12, 2), nullable=False, default=0)
     total_tax: Mapped[float] = mapped_column(Numeric(12, 2), nullable=False, default=0)
     net_salary: Mapped[float] = mapped_column(Numeric(12, 2), nullable=False)
-    days_worked: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    days_absent: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    days_worked: Mapped[float] = mapped_column(Numeric(6, 2), nullable=False, default=0)
+    days_absent: Mapped[float] = mapped_column(Numeric(6, 2), nullable=False, default=0)
     status: Mapped[str] = mapped_column(String(30), nullable=False, default='draft')
     processed_by: Mapped[str] = mapped_column(String(36), ForeignKey('users.id'), nullable=True)
     processed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -729,7 +733,7 @@ class PayslipComponent(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
     payslip_id: Mapped[str] = mapped_column(String(36), ForeignKey('payslips.id'), nullable=False, index=True)
-    salary_component_id: Mapped[str] = mapped_column(String(36), ForeignKey('salary_components.id'), nullable=False)
+    salary_component_id: Mapped[str | None] = mapped_column(String(36), ForeignKey('salary_components.id'), nullable=True)
     component_name: Mapped[str] = mapped_column(String(120), nullable=False)
     component_type: Mapped[str] = mapped_column(String(50), nullable=False)
     amount: Mapped[float] = mapped_column(Numeric(12, 2), nullable=False)
@@ -1303,3 +1307,17 @@ class WorkflowInstance(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
+
+
+# Every business row has explicit ownership, including roots such as jobs/forms.
+# Global product catalog and tenant registry are platform-owned.
+from sqlalchemy import Column, UniqueConstraint
+GLOBAL_TABLES = {'tenants', 'plans', 'plan_features', 'feature_packages', 'feature_package_features'}
+TENANT_MODELS = []
+for _mapper in list(Base.registry.mappers):
+    _model = _mapper.class_
+    if _mapper.local_table.name not in GLOBAL_TABLES:
+        if 'tenant_id' not in _mapper.local_table.c:
+            setattr(_model, 'tenant_id', Column(String(36), ForeignKey('tenants.id'), nullable=True, index=True))
+        TENANT_MODELS.append(_model)
+Payslip.__table__.append_constraint(UniqueConstraint('employee_id', 'month', 'year', name='uq_payslip_employee_period'))

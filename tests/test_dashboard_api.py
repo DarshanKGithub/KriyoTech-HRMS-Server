@@ -1,7 +1,8 @@
+from tests.company_fixtures import company_fixture
 """Tests for dashboard API endpoints including role-based access."""
 
 import pytest
-from fastapi.testclient import TestClient
+from app.testing import APIClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -9,7 +10,7 @@ from sqlalchemy.pool import StaticPool
 from app.db.database import Base, get_db
 from app.db.models import User, Department, Employee
 from app.core.security import hash_password, create_access_token
-from app.main import app
+from app.http import override_dependencies
 
 
 @pytest.fixture()
@@ -36,6 +37,7 @@ def db_session():
     
     for user in users:
         session.add(user)
+    company_fixture(session)
     session.commit()
     
     try:
@@ -50,10 +52,11 @@ def client(db_session):
     def override_get_db():
         return db_session
 
-    app.dependency_overrides[get_db] = override_get_db
-    with TestClient(app) as test_client:
+
+    with override_dependencies({get_db: override_get_db}):
+        test_client = APIClient()
         yield test_client
-    app.dependency_overrides.clear()
+
 
 
 def get_token(user_email: str):
@@ -72,13 +75,13 @@ def test_dashboard_summary_requires_authentication(client):
 def test_dashboard_summary_returns_valid_structure(client, db_session):
     """Test that dashboard summary returns expected data structure."""
     # Create test data
-    dept = Department(name='Engineering')
+    dept = Department(tenant_id='test-company', name='Engineering')
     db_session.add(dept)
     db_session.commit()
     db_session.refresh(dept)
 
     for i in range(3):
-        emp = Employee(
+        emp = Employee(tenant_id='test-company', 
             full_name=f'Employee {i}',
             email=f'emp{i}@test.com',
             department_id=dept.id,
@@ -124,17 +127,17 @@ def test_dashboard_summary_returns_valid_structure(client, db_session):
 
 def test_dashboard_summary_with_department_filter(client, db_session):
     """Test dashboard summary with department_id filter."""
-    dept_eng = Department(name='Engineering')
-    dept_hr = Department(name='HR')
+    dept_eng = Department(tenant_id='test-company', name='Engineering')
+    dept_hr = Department(tenant_id='test-company', name='HR')
     db_session.add_all([dept_eng, dept_hr])
     db_session.commit()
     db_session.refresh(dept_eng)
     db_session.refresh(dept_hr)
 
     # Add employees to both departments
-    emp1 = Employee(full_name='Alice', email='alice@test.com', department_id=dept_eng.id, is_active=True)
-    emp2 = Employee(full_name='Bob', email='bob@test.com', department_id=dept_eng.id, is_active=True)
-    emp3 = Employee(full_name='Cara', email='cara@test.com', department_id=dept_hr.id, is_active=True)
+    emp1 = Employee(tenant_id='test-company', full_name='Alice', email='alice@test.com', department_id=dept_eng.id, is_active=True)
+    emp2 = Employee(tenant_id='test-company', full_name='Bob', email='bob@test.com', department_id=dept_eng.id, is_active=True)
+    emp3 = Employee(tenant_id='test-company', full_name='Cara', email='cara@test.com', department_id=dept_hr.id, is_active=True)
     db_session.add_all([emp1, emp2, emp3])
     db_session.commit()
 
@@ -173,11 +176,11 @@ def test_dashboard_summary_invalid_date_range(client):
 def test_dashboard_summary_all_roles_can_access(client, db_session):
     """Test that all authenticated roles can access dashboard."""
     # Create test employees
-    dept = Department(name='Engineering')
+    dept = Department(tenant_id='test-company', name='Engineering')
     db_session.add(dept)
     db_session.commit()
 
-    emp = Employee(full_name='Test', email='test@test.com', department_id=dept.id)
+    emp = Employee(tenant_id='test-company', full_name='Test', email='test@test.com', department_id=dept.id)
     db_session.add(emp)
     db_session.commit()
 
@@ -203,13 +206,13 @@ def test_dashboard_summary_all_roles_can_access(client, db_session):
 
 def test_dashboard_summary_with_multiple_filters(client, db_session):
     """Test dashboard with multiple filters applied."""
-    dept = Department(name='Engineering')
+    dept = Department(tenant_id='test-company', name='Engineering')
     db_session.add(dept)
     db_session.commit()
     db_session.refresh(dept)
 
     for i in range(5):
-        emp = Employee(
+        emp = Employee(tenant_id='test-company', 
             full_name=f'Employee {i}',
             email=f'emp{i}@test.com',
             department_id=dept.id,

@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 
 class LoginRequest(BaseModel):
     email: str = Field(min_length=3)
-    password: str = Field(min_length=6)
+    password: str = Field(min_length=1)
     role: str | None = None
 
 
@@ -45,8 +45,8 @@ class RoleUpdateRequest(BaseModel):
 
 
 class ChangePasswordRequest(BaseModel):
-    old_password: str = Field(min_length=6)
-    new_password: str = Field(min_length=6)
+    old_password: str = Field(min_length=8)
+    new_password: str = Field(min_length=8)
 
 
 class PasswordChangeResponse(BaseModel):
@@ -75,7 +75,7 @@ class RegisterRequest(BaseModel):
     company_name: str = Field(min_length=1)
     admin_name: str = Field(min_length=1)
     admin_email: str = Field(min_length=3)
-    password: str = Field(min_length=6)
+    password: str = Field(min_length=8)
 
 class RegisterResponse(BaseModel):
     message: str

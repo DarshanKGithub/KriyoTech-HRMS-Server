@@ -3,7 +3,7 @@
 from datetime import date, datetime, timezone
 
 import pytest
-from fastapi import HTTPException
+from app.http import HTTPException
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 

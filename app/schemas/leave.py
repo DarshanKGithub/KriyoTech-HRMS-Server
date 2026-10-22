@@ -7,7 +7,7 @@ class LeaveTypePublic(BaseModel):
     id: str
     name: str
     description: str | None = None
-    default_days_per_year: int
+    default_days_per_year: float
     is_active: bool
     created_at: datetime
 
@@ -38,7 +38,7 @@ class LeaveRequestPublic(BaseModel):
     end_date: date
     session_from: str | None = None
     session_to: str | None = None
-    days_requested: int
+    days_requested: float
     reason: str | None = None
     contact_details: str | None = None
     cc_to: str | None = None
@@ -60,8 +60,8 @@ class LeaveBalancePublic(BaseModel):
     employee_id: str
     leave_type_id: str
     year: int
-    granted_days: int
-    balance_days: int
+    granted_days: float
+    balance_days: float
     created_at: datetime
     updated_at: datetime
 

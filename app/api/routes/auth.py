@@ -1,5 +1,5 @@
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from app.http import Router, Depends, File, HTTPException, UploadFile, status
+from app.http import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
 from app.db.database import get_db
@@ -28,7 +28,7 @@ from app.services.auth_service import (
 )
 from app.core.rbac import get_permissions_for_role
 
-router = APIRouter()
+router = Router()
 security = HTTPBearer(auto_error=False)
 
 
@@ -69,7 +69,7 @@ def update_me(
 
 
 @router.post('/me/avatar', response_model=AvatarUploadResponse)
-async def upload_me_avatar(
+def upload_me_avatar(
     avatar: UploadFile = File(...),
     credentials: HTTPAuthorizationCredentials | None = Depends(security),
     db: Session = Depends(get_db),
@@ -78,7 +78,7 @@ async def upload_me_avatar(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail='Not authenticated')
 
     user = get_user_from_token(credentials.credentials, db=db)
-    content = await avatar.read()
+    content = avatar.file.read()
     avatar_url = save_user_avatar(user.id, avatar.filename or '', avatar.content_type, content)
     return AvatarUploadResponse(avatar_url=avatar_url)
 

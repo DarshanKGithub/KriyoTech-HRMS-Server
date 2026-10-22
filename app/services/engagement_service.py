@@ -1,7 +1,7 @@
 from sqlalchemy.orm import Session
 from sqlalchemy import desc
 from typing import Tuple, List, Optional
-from fastapi import HTTPException, status
+from app.http import HTTPException, status
 from datetime import datetime, timezone
 
 from app.db.models import HelpdeskTicket, Announcement, GatePass, Employee

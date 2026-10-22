@@ -1,8 +1,10 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
+from app.services.auth_service import resolve_employee_id
+from app.http import Router, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
+from sqlalchemy import select
 from typing import Optional
 
-from app.core.rbac import get_current_user, require_permissions
+from app.core.rbac import get_current_user, require_permissions, has_permission
 from app.db.database import get_db
 from app.db.models import User, SalaryStructure, Reimbursement, EmployeeLoan
 from app.schemas.financials import (
@@ -11,7 +13,7 @@ from app.schemas.financials import (
     EmployeeLoanCreate, EmployeeLoanPublic
 )
 
-router = APIRouter()
+router = Router()
 
 # --- Salary Structure ---
 
@@ -21,17 +23,22 @@ def create_salary_structure(
     user: User = Depends(require_permissions('process_payroll')),
     db: Session = Depends(get_db)
 ):
-    existing = db.query(SalaryStructure).filter(SalaryStructure.employee_id == payload.employee_id).first()
+    from app.db.models import Employee
+    from app.core.business_time import business_today
+    from app.services.payroll_service import update_salary
+    employee = db.scalar(select(Employee).where(Employee.id==payload.employee_id))
+    if not employee:
+        raise HTTPException(404, 'Employee not found')
+    existing = db.scalar(select(SalaryStructure).where(SalaryStructure.employee_id==payload.employee_id))
+    data=payload.model_dump(exclude={'effective_from'})
     if existing:
-        for k, v in payload.model_dump().items():
-            setattr(existing, k, v)
-        struct = existing
+        for key,value in data.items(): setattr(existing,key,value)
+        struct=existing
     else:
-        struct = SalaryStructure(**payload.model_dump())
-        db.add(struct)
-    db.commit()
-    db.refresh(struct)
-    return SalaryStructurePublic.model_validate(struct, from_attributes=True)
+        struct=SalaryStructure(**data); db.add(struct)
+    update_salary(employee.id,payload.base_salary,None,payload.effective_from or business_today(db,user.tenant_id),'Compensation setup',user.id,db,tenant_id=user.tenant_id)
+    return SalaryStructurePublic.model_validate(struct,from_attributes=True)
+
 
 @router.get('/salary-structures/{employee_id}', response_model=SalaryStructurePublic)
 def get_salary_structure(
@@ -39,7 +46,7 @@ def get_salary_structure(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    if employee_id != user.id and user.role not in ['HR', 'Admin', 'Manager', 'CEO']:
+    if employee_id != resolve_employee_id(user, db) and not has_permission(user.role, 'view_payroll'):
         raise HTTPException(status_code=403, detail='Not authorized')
 
     struct = db.query(SalaryStructure).filter(SalaryStructure.employee_id == employee_id).first()
@@ -69,7 +76,7 @@ def list_reimbursements(
 ):
     query = db.query(Reimbursement)
     if employee_id:
-        if employee_id != user.id and user.role not in ['HR', 'Admin', 'Manager']:
+        if employee_id != resolve_employee_id(user, db) and user.role not in ['HR', 'Admin', 'Manager']:
             raise HTTPException(status_code=403, detail="Not authorized")
         query = query.filter(Reimbursement.employee_id == employee_id)
     else:
@@ -116,7 +123,7 @@ def list_loans(
 ):
     query = db.query(EmployeeLoan)
     if employee_id:
-        if employee_id != user.id and user.role not in ['HR', 'Admin', 'Manager']:
+        if employee_id != resolve_employee_id(user, db) and user.role not in ['HR', 'Admin', 'Manager']:
             raise HTTPException(status_code=403, detail="Not authorized")
         query = query.filter(EmployeeLoan.employee_id == employee_id)
     else:

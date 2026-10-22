@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from app.http import Router, Depends, Query, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -17,14 +17,26 @@ from app.services.employee_service import search_employees, create_employee, get
 from app.services.employee_service import get_manager_chain
 from app.services.audit_service import create_audit_log
 
-router = APIRouter()
+router = Router()
+
+
+def _require_employee_tenant(user):
+    if user.role != 'Super Admin' and not user.tenant_id:
+        raise HTTPException(403, 'An organization assignment is required')
+    return user.tenant_id
 
 
 @router.get('/', response_model=PaginatedEmployees)
-def employees(page: int = 1, size: int = 20, q: str | None = None, department_id: str | None = None,
-              designation_id: str | None = None, db: Session = Depends(get_db), user: User = Depends(require_permissions('view_employee'))):
+def employees(page: int = Query(1, ge=1), size: int = Query(20, ge=1, le=100), q: str | None = None, department_id: str | None = None,
+              designation_id: str | None = None, sort_by: str = 'full_name', sort_dir: str = 'asc', is_active: bool | None = None,
+              db: Session = Depends(get_db), user: User = Depends(require_permissions('view_employee'))):
     is_super_admin = user.role == 'Super Admin'
-    items, total = search_employees(db=db, page=page, size=size, q=q, department_id=department_id, designation_id=designation_id, tenant_id=user.tenant_id, is_super_admin=is_super_admin)
+    _require_employee_tenant(user)
+    from app.services.auth_service import resolve_employee_id
+    manager_id = resolve_employee_id(user, db) if user.role == 'Manager' else None
+    if user.role == 'Manager' and not manager_id:
+        raise HTTPException(403, 'A linked employee record is required')
+    items, total = search_employees(db=db, page=page, size=size, q=q, department_id=department_id, designation_id=designation_id, tenant_id=user.tenant_id, is_super_admin=is_super_admin, sort_by=sort_by, sort_dir=sort_dir, is_active=is_active, manager_id=manager_id)
     return PaginatedEmployees(
         items=[EmployeePublic(
             id=e.id,
@@ -51,7 +63,7 @@ def create(
     user: User = Depends(require_permissions('create_employee')),
     db: Session = Depends(get_db),
 ):
-    e = create_employee(payload=payload, db=db, actor_id=user.id, tenant_id=user.tenant_id)
+    e = create_employee(payload=payload, db=db, actor_id=user.id, tenant_id=_require_employee_tenant(user))
     linked_user = db.scalar(select(User).where(User.id == e.id))
     public = _to_employee_public(e)
     return EmployeePublicWithAccount(
@@ -63,16 +75,17 @@ def create(
 
 @router.get('/{employee_id}', response_model=EmployeePublic)
 def get_one(employee_id: str, db: Session = Depends(get_db), user: User = Depends(require_permissions('view_employee'))):
-    e = get_employee(employee_id, db=db, tenant_id=user.tenant_id)
-    return EmployeePublic(
-        id=e.id,
-        full_name=e.full_name,
-        email=e.email,
-        department_id=e.department_id,
-        designation_id=e.designation_id,
-        manager_id=e.manager_id,
-        is_active=e.is_active,
-    )
+    e = get_employee(employee_id, db=db, tenant_id=_require_employee_tenant(user))
+    from app.services.auth_service import resolve_employee_id
+    from app.core.rbac import has_permission
+    own_id = resolve_employee_id(user, db)
+    if user.role == 'Manager' and e.id != own_id and e.manager_id != own_id:
+        raise HTTPException(403, 'Only direct-report profiles are available')
+    public = EmployeePublic.model_validate(e, from_attributes=True)
+    if e.id != own_id and not has_permission(user.role, 'process_payroll'):
+        for field in ('bank_account_number', 'bank_ifsc_code', 'pan_number', 'aadhar_number'):
+            setattr(public, field, None)
+    return public
 
 
 @router.patch('/{employee_id}', response_model=EmployeePublic)
@@ -83,7 +96,7 @@ def patch(
     db: Session = Depends(get_db),
 ):
 
-    e = update_employee(employee_id, payload=payload, db=db, actor_id=user.id, tenant_id=user.tenant_id)
+    e = update_employee(employee_id, payload=payload, db=db, actor_id=user.id, tenant_id=_require_employee_tenant(user))
     return EmployeePublic(
         id=e.id,
         full_name=e.full_name,
@@ -98,7 +111,7 @@ def patch(
 @router.delete('/{employee_id}')
 def remove(employee_id: str, user: User = Depends(require_permissions('delete_employee')), db: Session = Depends(get_db)):
 
-    delete_employee(employee_id, db=db, actor_id=user.id, tenant_id=user.tenant_id)
+    delete_employee(employee_id, db=db, actor_id=user.id, tenant_id=_require_employee_tenant(user))
     return {'detail': 'deleted'}
 
 
@@ -114,17 +127,17 @@ def update_role(
     
     linked_user = db.scalar(select(User).where(User.id == e.id))
     if not linked_user:
-        from fastapi import HTTPException, status
+        from app.http import HTTPException, status
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Employee does not have a user account")
 
     allowed_roles = {'Worker', 'Employee', 'Manager', 'HR', 'Admin', 'CEO'}
     new_role = payload.role.strip()
     if new_role not in allowed_roles:
-        from fastapi import HTTPException, status
+        from app.http import HTTPException, status
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Invalid role')
 
     if user.id == linked_user.id:
-        from fastapi import HTTPException, status
+        from app.http import HTTPException, status
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Cannot change your own role')
 
     old_role = linked_user.role
@@ -157,75 +170,24 @@ def manager_chain(employee_id: str, db: Session = Depends(get_db), user: User = 
     chain = get_manager_chain(employee_id=employee_id, db=db, tenant_id=user.tenant_id)
     return chain
 
-import os
-import shutil
-from uuid import uuid4
-from fastapi import UploadFile, File, Form, HTTPException, status
-from fastapi.responses import FileResponse
+from app.http import UploadFile, File, Form, FileResponse
 from app.db.models import EmployeeDocument
 from app.schemas.document import EmployeeDocumentPublic
-from app.core.rbac import get_current_user, has_permission
+from app.core.rbac import get_current_user
+from app.services.document_service import save_employee_document, list_employee_documents, downloadable_document
 
-UPLOAD_DIR = "uploads/documents"
-os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 @router.post('/{employee_id}/documents', response_model=EmployeeDocumentPublic)
-def upload_document(
-    employee_id: str,
-    document_type: str = Form(...),
-    file: UploadFile = File(...),
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    from app.services.auth_service import resolve_employee_id
+def upload_document(employee_id: str, document_type: str = Form(...), file: UploadFile = File(...), user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    return save_employee_document(employee_id, document_type, file, user, db)
 
-    own_employee_id = resolve_employee_id(user, db)
-    if employee_id != own_employee_id and not has_permission(user.role, 'edit_employee'):
-        raise HTTPException(status_code=403, detail="Not authorized to upload documents for this employee")
-
-    file_id = str(uuid4())
-    ext = file.filename.split('.')[-1] if '.' in file.filename else ''
-    safe_filename = f"{file_id}.{ext}" if ext else file_id
-    file_path = os.path.join(UPLOAD_DIR, safe_filename)
-
-    with open(file_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
-
-    doc = EmployeeDocument(
-        employee_id=employee_id,
-        document_type=document_type,
-        file_name=file.filename,
-        file_path=file_path,
-        uploaded_by=user.id
-    )
-    db.add(doc)
-    db.commit()
-    db.refresh(doc)
-    return EmployeeDocumentPublic.model_validate(doc, from_attributes=True)
 
 @router.get('/{employee_id}/documents', response_model=list[EmployeeDocumentPublic])
-def list_documents(
-    employee_id: str,
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    if employee_id != user.id and not has_permission(user.role, 'view_employee'): # Note: view_employee check
-        pass # simplified for now
-    
-    docs = db.query(EmployeeDocument).filter(EmployeeDocument.employee_id == employee_id).all()
-    return [EmployeeDocumentPublic.model_validate(d, from_attributes=True) for d in docs]
+def list_documents(employee_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    return list_employee_documents(employee_id, user, db)
+
 
 @router.get('/documents/{doc_id}/download')
-def download_document(
-    doc_id: str,
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    doc = db.query(EmployeeDocument).filter(EmployeeDocument.id == doc_id).first()
-    if not doc:
-        raise HTTPException(status_code=404, detail="Document not found")
-
-    if not os.path.exists(doc.file_path):
-        raise HTTPException(status_code=404, detail="File not found on server")
-
-    return FileResponse(doc.file_path, filename=doc.file_name)
+def download_document(doc_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    document, path = downloadable_document(doc_id, user, db)
+    return FileResponse(path, filename=document.file_name)

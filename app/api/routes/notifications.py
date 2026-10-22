@@ -2,7 +2,7 @@
 API Routes for Notification Automation
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from app.http import Router, Depends, HTTPException, status, Query
 from sqlalchemy.orm import Session
 
 from app.db.database import get_db
@@ -18,7 +18,7 @@ from app.schemas.notifications import (
     NotificationPreferenceUpdate, NotificationPreferencePublic,
     BulkNotificationCreate, NotificationStats, NotificationFilter
 )
-router = APIRouter(tags=['Notifications'])
+router = Router(tags=['Notifications'])
 
 
 # --- Template Management ---
@@ -214,7 +214,13 @@ def mark_notifications_read(
     db: Session = Depends(get_db)
 ):
     """Mark multiple notifications as read"""
-    count = NotificationService.mark_multiple_as_read(db, notification_ids)
+    from app.db.models import Notification
+    from sqlalchemy import select
+    unique_ids = set(notification_ids)
+    owned_ids = set(db.scalars(select(Notification.id).where(Notification.id.in_(unique_ids), Notification.recipient_id == current_user.id)))
+    if owned_ids != unique_ids:
+        raise HTTPException(403, 'Only your own notifications can be marked as read')
+    count = NotificationService.mark_multiple_as_read(db, list(owned_ids))
     return {'marked_count': count}
 
 

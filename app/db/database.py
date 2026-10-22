@@ -14,8 +14,25 @@ engine_kwargs = {}
 if settings.sqlalchemy_database_url.startswith('sqlite'):
     engine_kwargs['connect_args'] = {'check_same_thread': False}
 
+class OwnedSession(Session):
+    def get(self, entity, ident, **kwargs):
+        result = super().get(entity, ident, **kwargs)
+        actor = self.info.get('actor')
+        if result is not None and actor and hasattr(result, 'tenant_id'):
+            if result.tenant_id != actor.tenant_id:
+                return None
+            if actor.role not in {'HR', 'Admin', 'CEO'}:
+                from app.db.models import Employee, User
+                if isinstance(result, Employee) and result.id not in actor.employee_ids:
+                    return None
+                if isinstance(result, User) and result.id not in actor.user_ids:
+                    return None
+                if hasattr(result,'employee_id') and result.employee_id not in actor.employee_ids:
+                    return None
+        return result
+
 engine = create_engine(settings.sqlalchemy_database_url, future=True, **engine_kwargs)
-SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
+SessionLocal = sessionmaker(bind=engine, class_=OwnedSession, autoflush=False, autocommit=False, expire_on_commit=False)
 
 
 def get_db() -> Generator[Session, None, None]:

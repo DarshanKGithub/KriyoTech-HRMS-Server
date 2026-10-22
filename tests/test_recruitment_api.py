@@ -1,5 +1,6 @@
+from tests.company_fixtures import company_fixture
 import pytest
-from fastapi.testclient import TestClient
+from app.testing import APIClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -7,7 +8,7 @@ from sqlalchemy.pool import StaticPool
 from app.db.database import Base, get_db
 from app.db.models import User
 from app.core.security import hash_password, create_access_token
-from app.main import app
+from app.http import override_dependencies
 
 
 @pytest.fixture()
@@ -24,6 +25,7 @@ def db_session():
 
     admin = User(full_name='Admin User', email='admin@test.com', role='Admin', password_hash=hash_password('password'))
     session.add(admin)
+    company_fixture(session)
     session.commit()
 
     try:
@@ -37,10 +39,11 @@ def client(db_session):
     def override_get_db():
         return db_session
 
-    app.dependency_overrides[get_db] = override_get_db
-    with TestClient(app) as test_client:
+
+    with override_dependencies({get_db: override_get_db}):
+        test_client = APIClient()
         yield test_client
-    app.dependency_overrides.clear()
+
 
 
 def auth_headers():

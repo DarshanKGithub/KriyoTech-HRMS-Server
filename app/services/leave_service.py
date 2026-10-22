@@ -3,7 +3,7 @@ from datetime import datetime
 from pathlib import Path
 from sqlalchemy import select, func
 from sqlalchemy.orm import Session
-from fastapi import HTTPException, status
+from app.http import HTTPException, status
 import json
 
 from app.db.models import LeaveRequest, LeaveType, LeaveBalance, Employee, AuditLog, Holiday
@@ -71,7 +71,21 @@ def create_leave_request(employee_id: str, payload, db: Session, tenant_id: str 
     if payload.start_date > payload.end_date:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='start_date must be before end_date')
 
-    days = _days_between(payload.start_date, payload.end_date)
+    if payload.start_date.year != payload.end_date.year:
+        raise HTTPException(400, 'Submit separate leave requests for each calendar year')
+    overlap = db.query(LeaveRequest).filter(LeaveRequest.employee_id == employee_id, LeaveRequest.status.in_(['pending', 'pending_manager', 'pending_hr', 'approved']), LeaveRequest.start_date <= payload.end_date, LeaveRequest.end_date >= payload.start_date).first()
+    if overlap:
+        raise HTTPException(409, 'This request overlaps existing leave')
+    from datetime import timedelta
+    from app.core.business_time import working_days
+    holidays = {item.holiday_date for item in db.query(Holiday).filter(Holiday.tenant_id == tenant_id)} if tenant_id else set()
+    dates = [payload.start_date + timedelta(days=i) for i in range(_days_between(payload.start_date, payload.end_date))]
+    dates = [day for day in dates if day.weekday() in working_days(db, tenant_id) and day not in holidays] if tenant_id else dates
+    days = float(len(dates))
+    if dates and dates[0] == payload.start_date and payload.session_from == 'Session 2': days -= .5
+    if dates and dates[-1] == payload.end_date and payload.session_to == 'Session 1': days -= .5
+    if days <= 0:
+        raise HTTPException(400, 'Select at least one working half-day')
 
     # Convert cc_to and attachment_paths lists to JSON strings
     cc_to_json = json.dumps(payload.cc_to) if payload.cc_to else None
@@ -141,7 +155,7 @@ def list_leave_requests(db: Session, tenant_id: str | None = None, employee_id: 
 
 
 def _get_or_create_balance(employee_id: str, leave_type_id: str, year: int, db: Session) -> LeaveBalance:
-    bal = db.query(LeaveBalance).filter(LeaveBalance.employee_id == employee_id, LeaveBalance.leave_type_id == leave_type_id, LeaveBalance.year == year).first()
+    bal = db.query(LeaveBalance).filter(LeaveBalance.employee_id == employee_id, LeaveBalance.leave_type_id == leave_type_id, LeaveBalance.year == year).with_for_update().first()
     if bal:
         return bal
     # try to create from LeaveType default
@@ -149,20 +163,31 @@ def _get_or_create_balance(employee_id: str, leave_type_id: str, year: int, db: 
     default_days = lt.default_days_per_year if lt else 0
     bal = LeaveBalance(employee_id=employee_id, leave_type_id=leave_type_id, year=year, granted_days=default_days, balance_days=default_days)
     db.add(bal)
-    db.commit()
-    db.refresh(bal)
+    db.flush()
     return bal
 
 
 def approve_leave(leave_id: str, approver_id: str, approve: bool, db: Session, tenant_id: str | None = None) -> LeaveRequest:
     from app.db.models import User
-    lr = get_leave_request(leave_id, db, tenant_id)
+    # Lock the request and balance so concurrent approvals cannot deduct twice.
+    lr = db.query(LeaveRequest).filter(LeaveRequest.id == leave_id).with_for_update().first()
+    if not lr or tenant_id and lr.tenant_id != tenant_id:
+        raise HTTPException(404, 'Leave request not found')
     if lr.status not in ['pending', 'pending_manager', 'pending_hr']:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Leave request is not pending')
 
     user = db.query(User).filter(User.id == approver_id).first()
     if not user:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Approver not found')
+
+    from app.services.auth_service import resolve_employee_id
+    employee = db.get(Employee, lr.employee_id)
+    if user.role == 'Manager' and (not employee or employee.manager_id != resolve_employee_id(user, db)):
+        raise HTTPException(403, 'Only the assigned manager can review this request')
+    if user.role not in {'Manager','HR','Admin','CEO'}:
+        raise HTTPException(403, 'Your role cannot approve leave')
+    if resolve_employee_id(user, db) == lr.employee_id:
+        raise HTTPException(403, 'You cannot approve your own leave')
 
     if approve:
         if lr.status in ['pending', 'pending_manager']:
@@ -178,9 +203,11 @@ def approve_leave(leave_id: str, approver_id: str, approve: bool, db: Session, t
 
             year = lr.start_date.year
             bal = _get_or_create_balance(lr.employee_id, lr.leave_type_id, year, db)
-            if bal.balance_days < lr.days_requested:
+            kind = db.get(LeaveType, lr.leave_type_id)
+            if kind.is_paid and bal.balance_days < lr.days_requested:
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Insufficient leave balance')
-            bal.balance_days -= lr.days_requested
+            if kind.is_paid:
+                bal.balance_days -= lr.days_requested
             bal.updated_at = datetime.now()
             lr.status = 'approved'
             lr.approver_id = approver_id
@@ -231,6 +258,7 @@ def bulk_approve_leave(request_ids: list[str], approver_id: str, approve: bool, 
             else:
                 rejected += 1
         except Exception:
+            db.rollback()
             failed += 1
             failed_ids.append(request_id)
 

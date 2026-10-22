@@ -1,7 +1,7 @@
 from datetime import date, datetime
 
-from fastapi import APIRouter, Depends, HTTPException, status, Query
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from app.http import Router, Depends, HTTPException, status, Query
+from app.http import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
 from app.db.database import get_db
@@ -22,7 +22,13 @@ from app.core.rbac import has_permission, get_current_user
 
 security = HTTPBearer(auto_error=False)
 
-router = APIRouter()
+router = Router()
+
+
+@router.get('/workspace', response_model=dict)
+def workspace(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    from app.services.workspace_service import workspace_dashboard
+    return workspace_dashboard(user, db)
 
 
 @router.get('/summary', response_model=DashboardSummaryResponse)

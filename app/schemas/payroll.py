@@ -96,8 +96,8 @@ class PayslipPublic(BaseModel):
     total_deductions: float
     total_tax: float
     net_salary: float
-    days_worked: int
-    days_absent: int
+    days_worked: float
+    days_absent: float
     status: str
     processed_by: str | None
     processed_at: datetime | None

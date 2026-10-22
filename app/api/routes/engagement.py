@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from app.http import Router, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 from typing import Optional
 from pydantic import BaseModel
@@ -37,7 +37,7 @@ from app.services.grievance_service import (
     investigate_grievance
 )
 
-router = APIRouter()
+router = Router()
 
 # --- Gate Pass Routes ---
 from app.schemas.engagement import GatePassCreate, GatePassPublic, PaginatedGatePasses, GatePassStatusUpdate
@@ -54,7 +54,7 @@ def submit_gatepass(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail='Cannot create gate pass for others')
 
     gp = create_gatepass(payload, db)
-    return GatePassPublic.model_validate(gp)
+    return GatePassPublic.model_validate(gp, from_attributes=True)
 
 
 @router.get('/gatepasses', response_model=PaginatedGatePasses)
@@ -73,7 +73,7 @@ def list_gatepass_endpoint(
         employee_id = user.id
 
     items, total = list_gatepasses(db, employee_id=employee_id, status=status, page=page, size=size)
-    return PaginatedGatePasses(items=[GatePassPublic.model_validate(i) for i in items], total=total, page=page, size=size)
+    return PaginatedGatePasses(items=[GatePassPublic.model_validate(i, from_attributes=True) for i in items], total=total, page=page, size=size)
 
 
 @router.put('/gatepasses/{gp_id}/status', response_model=GatePassPublic)
@@ -84,7 +84,7 @@ def update_gatepass_status_endpoint(
     db: Session = Depends(get_db),
 ):
     gp = update_gatepass_status(gp_id, payload.status, user.id, payload.comments, db)
-    return GatePassPublic.model_validate(gp)
+    return GatePassPublic.model_validate(gp, from_attributes=True)
 
 
 # --- Helpdesk Routes ---
@@ -117,7 +117,7 @@ def list_tickets(
 
     items, total = get_tickets(db, employee_id, category, page, size)
     return PaginatedHelpdeskTickets(
-        items=[HelpdeskTicketPublic.model_validate(i) for i in items],
+        items=[HelpdeskTicketPublic.model_validate(i, from_attributes=True) for i in items],
         total=total,
         page=page,
         size=size
@@ -166,7 +166,7 @@ def list_active_announcements(
 ):
     items, total = get_announcements(db, page, size)
     return PaginatedAnnouncements(
-        items=[AnnouncementPublic.model_validate(i) for i in items],
+        items=[AnnouncementPublic.model_validate(i, from_attributes=True) for i in items],
         total=total,
         page=page,
         size=size
@@ -183,7 +183,7 @@ def file_grievance(
 ):
     """File a new employee grievance"""
     grievance = create_grievance(payload, user.id, db)
-    return EmployeeGrievancePublic.model_validate(grievance)
+    return EmployeeGrievancePublic.model_validate(grievance, from_attributes=True)
 
 
 @router.get('/grievances', response_model=PaginatedEmployeeGrievances)
@@ -210,7 +210,7 @@ def list_grievances(
         )
     
     return PaginatedEmployeeGrievances(
-        items=[EmployeeGrievancePublic.model_validate(i) for i in items],
+        items=[EmployeeGrievancePublic.model_validate(i, from_attributes=True) for i in items],
         total=total,
         page=page,
         size=size
@@ -232,7 +232,7 @@ def get_grievance_detail(
     if grievance.employee_id != user.id and not has_permission(user.role, 'manage_grievances'):
         raise HTTPException(status_code=403, detail='Cannot access this grievance')
     
-    return EmployeeGrievancePublic.model_validate(grievance)
+    return EmployeeGrievancePublic.model_validate(grievance, from_attributes=True)
 
 
 @router.put('/grievances/{grievance_id}/status', response_model=EmployeeGrievancePublic)
@@ -247,7 +247,7 @@ def update_grievance_status_endpoint(
     if not grievance:
         raise HTTPException(status_code=404, detail='Grievance not found')
     
-    return EmployeeGrievancePublic.model_validate(grievance)
+    return EmployeeGrievancePublic.model_validate(grievance, from_attributes=True)
 
 
 @router.put('/grievances/{grievance_id}/investigate', response_model=EmployeeGrievancePublic)
@@ -262,4 +262,4 @@ def investigate_grievance_endpoint(
     if not grievance:
         raise HTTPException(status_code=404, detail='Grievance not found')
     
-    return EmployeeGrievancePublic.model_validate(grievance)
+    return EmployeeGrievancePublic.model_validate(grievance, from_attributes=True)

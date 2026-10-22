@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
+from app.http import Router, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from typing import Optional
 
@@ -28,7 +28,7 @@ from app.services.recruitment_service import (
     parse_resume_text,
 )
 
-router = APIRouter()
+router = Router()
 
 # --- Job Postings ---
 

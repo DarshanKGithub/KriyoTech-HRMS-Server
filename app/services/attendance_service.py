@@ -14,7 +14,7 @@ from app.schemas.attendance import (
     EmployeeAttendanceSummary,
 )
 from app.services.shift_service import get_employee_current_shift
-from fastapi import HTTPException, status
+from app.http import HTTPException, status
 
 
 logger = logging.getLogger(__name__)
@@ -41,19 +41,10 @@ class AttendanceRuleEngine:
         if not shift or not check_in_time:
             return 0
 
-        # Convert check-in time to time only
-        check_in_time_only = check_in_time.time()
-        shift_start = shift.start_time
-
-        # Calculate minutes late
-        check_in_minutes = check_in_time_only.hour * 60 + check_in_time_only.minute
-        shift_start_minutes = shift_start.hour * 60 + shift_start.minute
-
-        minutes_late = check_in_minutes - shift_start_minutes
-        # Apply grace period
-        minutes_late = max(0, minutes_late - shift.grace_period_minutes)
-
-        return minutes_late
+        start = datetime.combine(check_in_time.date(), shift.start_time, tzinfo=check_in_time.tzinfo)
+        if shift.end_time < shift.start_time and check_in_time.time() < shift.end_time:
+            start -= timedelta(days=1)
+        return max(0, int((check_in_time-start).total_seconds()/60)-shift.grace_period_minutes)
 
     def is_late_entry(self, late_minutes: int) -> bool:
         """Check if entry is considered late based on rules."""
@@ -156,7 +147,9 @@ def create_attendance(payload: AttendanceCreate, db: Session, tenant_id: str | N
     check_out_time = payload.check_out_time
 
     # Calculate metrics
-    late_minutes = rule_engine.calculate_late_minutes(check_in_time, shift) if check_in_time else 0
+    from app.core.business_time import local_time
+    rule_time = local_time(check_in_time, db, tenant_id) if tenant_id else check_in_time
+    late_minutes = rule_engine.calculate_late_minutes(rule_time, shift) if check_in_time else 0
     is_late = rule_engine.is_late_entry(late_minutes)
 
     working_hours = rule_engine.calculate_working_hours(check_in_time, check_out_time)
@@ -223,10 +216,14 @@ def check_in(payload: CheckInRequest, db: Session, tenant_id: str | None = None)
     shift = get_employee_current_shift(payload.employee_id, payload.attendance_date, db)
 
     check_in_time = payload.check_in_time or datetime.now(timezone.utc)
-    late_minutes = rule_engine.calculate_late_minutes(check_in_time, shift)
+    from app.core.business_time import local_time
+    rule_time = local_time(check_in_time, db, tenant_id) if tenant_id else check_in_time
+    late_minutes = rule_engine.calculate_late_minutes(rule_time, shift)
     # is_late marks late beyond grace period; separate policy thresholds can be handled elsewhere.
     is_late = late_minutes > 0
 
+    if existing and existing.check_in_time:
+        raise HTTPException(409, 'Attendance is already checked in; use a correction request')
     if existing:
         # Update existing record
         existing.check_in_time = check_in_time
@@ -286,14 +283,19 @@ def check_out(payload: CheckOutRequest, db: Session, tenant_id: str | None = Non
             detail='No check-in record found for today. Please check-in first.',
         )
 
+    if attendance.check_out_time:
+        raise HTTPException(409, 'Attendance is already checked out')
+    if any(b.end_time is None for b in attendance.breaks):
+        raise HTTPException(409, 'End your active break before checking out')
     # Initialize rule engine
     rule_engine = AttendanceRuleEngine(db, tenant_id)
-
-    # Get employee's shift
     shift = get_employee_current_shift(payload.employee_id, payload.attendance_date, db)
-
     check_out_time = payload.check_out_time or datetime.now(timezone.utc)
 
+    normalized_in = attendance.check_in_time.replace(tzinfo=timezone.utc) if attendance.check_in_time.tzinfo is None else attendance.check_in_time
+    normalized_out = check_out_time.replace(tzinfo=timezone.utc) if check_out_time.tzinfo is None else check_out_time
+    if normalized_out <= normalized_in:
+        raise HTTPException(400, 'Check-out must be after check-in')
     # Calculate total break duration
     breaks_duration_hours = 0.0
     for b in attendance.breaks:
@@ -305,7 +307,8 @@ def check_out(payload: CheckOutRequest, db: Session, tenant_id: str | None = Non
     is_half_day = rule_engine.is_half_day(working_hours)
 
     # Check for early exit
-    is_early_exit = rule_engine.is_early_exit(check_out_time, shift)
+    from app.core.business_time import local_time
+    is_early_exit = rule_engine.is_early_exit(local_time(check_out_time, db, tenant_id) if tenant_id else check_out_time, shift)
 
     # Update attendance
     attendance.check_out_time = check_out_time
@@ -476,7 +479,8 @@ def _write_attendance_audit_log(db: Session, action: str, attendance: Attendance
 
     try:
         log = AuditLog(
-            actor_id=None,  # Could be set from request context
+            actor_id=db.info['actor'].id if db.info.get('actor') else None,
+            tenant_id=attendance.tenant_id,
             action=action,
             object_type='Attendance',
             object_id=attendance.id,
@@ -556,55 +560,46 @@ def end_break(payload, db: Session, tenant_id: str | None = None):
     if not active_break:
         raise HTTPException(status_code=400, detail="No active break to end.")
 
-    active_break.end_time = payload.end_time or datetime.now(timezone.utc)
+    end = payload.end_time or datetime.now(timezone.utc)
+    start = active_break.start_time
+    left = start.replace(tzinfo=timezone.utc) if start.tzinfo is None else start
+    right = end.replace(tzinfo=timezone.utc) if end.tzinfo is None else end
+    if right <= left:
+        raise HTTPException(400, 'Break end must be after break start')
+    active_break.end_time = end
     db.commit()
     db.refresh(attendance)
     return attendance
 
 
 def run_auto_checkout_job(db: Session):
-    """Automatically check out employees who forgot to log their departure."""
-    from datetime import datetime, timezone
-    from app.db.models import Attendance, Shift
-    from app.services.attendance_service import AttendanceRuleEngine
-
-    # For simplicity, we just sweep all records for today (or previous days) that have check_in but no check_out
-    now = datetime.now(timezone.utc)
-    
-    # Using UTC date might sweep records prematurely in some timezones if we just use now.date().
-    # A robust cron would check timezone mappings, but we'll stick to a simple sweep for now.
-    pending_records = db.query(Attendance).filter(
-        Attendance.check_in_time.isnot(None),
-        Attendance.check_out_time.is_(None)
-    ).all()
-
-    rule_engine = AttendanceRuleEngine(db)
-
-    for attendance in pending_records:
-        # End any active breaks
-        for b in attendance.breaks:
-            if not b.end_time:
-                b.end_time = now
-
-        # We will set their check-out time to either their shift end time or current time.
-        # To be safe, if this job runs at 11:59PM, we just use current time.
-        attendance.check_out_time = now
-        
-        # Calculate working hours and half-day status
-        breaks_duration_hours = sum(((b.end_time - b.start_time).total_seconds() / 3600.0) for b in attendance.breaks if b.start_time and b.end_time)
-        working_hours = rule_engine.calculate_working_hours(attendance.check_in_time, attendance.check_out_time, breaks_duration_hours)
-        attendance.is_half_day = rule_engine.is_half_day(working_hours)
-        
-        # Append a note to indicate it was auto-checked out
-        note_append = "System: Auto-checked out at end of day."
-        if attendance.notes:
-            attendance.notes = f"{attendance.notes} | {note_append}"
+    """Close only shifts whose local end has passed, including overnight shifts."""
+    from app.core.business_time import tenant_zone
+    from app.db.models import AttendanceBreak
+    now=datetime.now(timezone.utc)
+    records=db.query(Attendance).filter(Attendance.check_in_time.isnot(None),Attendance.check_out_time.is_(None)).all()
+    for attendance in records:
+        employee=db.get(Employee,attendance.employee_id)
+        if not employee or not employee.tenant_id:
+            continue
+        zone=tenant_zone(db,employee.tenant_id)
+        shift=get_employee_current_shift(employee.id,attendance.attendance_date,db)
+        if shift:
+            end_date=attendance.attendance_date+timedelta(days=1 if shift.end_time<=shift.start_time else 0)
+            cutoff=datetime.combine(end_date,shift.end_time,tzinfo=zone)
         else:
-            attendance.notes = note_append
-
-        attendance.updated_at = now
-        
-        _write_attendance_audit_log(db, 'AUTO_CHECKOUT', attendance)
-
-    db.commit()
-    logger.info(f"Auto-checkout job completed. Processed {len(pending_records)} records.")
+            from datetime import time
+            cutoff=datetime.combine(attendance.attendance_date,time(23,59),tzinfo=zone)
+        if cutoff.astimezone(timezone.utc)>now:
+            continue
+        attendance.check_out_time=cutoff.astimezone(timezone.utc)
+        for item in attendance.breaks:
+            if item.end_time is None: item.end_time=attendance.check_out_time
+        duration=sum(((item.end_time-item.start_time).total_seconds()/3600) for item in attendance.breaks if item.start_time and item.end_time)
+        rules=AttendanceRuleEngine(db,employee.tenant_id)
+        hours=rules.calculate_working_hours(attendance.check_in_time,attendance.check_out_time,duration)
+        attendance.is_half_day=rules.is_half_day(hours)
+        attendance.notes=((attendance.notes+' | ') if attendance.notes else '')+'System: checked out at scheduled shift end.'
+        attendance.updated_at=now
+        db.commit()
+        _write_attendance_audit_log(db,'AUTO_CHECKOUT',attendance)

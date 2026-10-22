@@ -1,7 +1,7 @@
 from collections.abc import Callable
 
-from fastapi import Depends, HTTPException, status
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from app.http import Depends, HTTPException, status
+from app.http import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
 from app.db.database import get_db
@@ -223,6 +223,7 @@ ROLE_PERMISSIONS: dict[str, set[str]] = {
         '*',
     },
     'CEO': {
+        *_module_permissions('employees', 'settings', 'recruitment'),
         *_module_permissions('common', 'reports', 'attendance', 'leave', 'payroll', 'performance', 'documents', 'notifications', 'engagement', 'organization'),
         'view_employee',
         'view_leave_analytics',
@@ -230,6 +231,9 @@ ROLE_PERMISSIONS: dict[str, set[str]] = {
         'view_project_allocation',
     },
 }
+
+
+ROLE_PERMISSIONS['Manager'] -= {'manage_attendance', 'manage_attendance_records', 'configure_leave_policies', 'manage_holidays', 'manage_gatepasses', 'manage_helpdesk', 'manage_grievances', 'view_audit_logs'}
 
 
 def _normalize_role(role: str | None) -> str:
@@ -269,6 +273,12 @@ def require_permissions(*required_permissions: str) -> Callable[[User], User]:
         return user
 
     return _checker
+
+
+def require_super_admin(user: User = Depends(get_current_user)) -> User:
+    if user.role != 'Super Admin':
+        raise HTTPException(status_code=403, detail='Platform administration requires a Super Admin account')
+    return user
 
 
 def require_entitlement(feature_key: str) -> Callable[[User], User]:

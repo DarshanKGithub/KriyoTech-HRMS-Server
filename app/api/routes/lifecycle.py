@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from app.http import Router, Depends
 from sqlalchemy.orm import Session
 
 from app.core.rbac import require_permissions, get_current_user
@@ -35,7 +35,7 @@ from app.services.lifecycle_service import (
     update_offer,
 )
 
-router = APIRouter()
+router = Router()
 
 
 @router.get('/summary', response_model=LifecycleCounts)

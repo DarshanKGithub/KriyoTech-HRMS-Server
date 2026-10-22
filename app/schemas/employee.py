@@ -34,7 +34,7 @@ class EmployeeCreate(BaseModel):
 
 class EmployeeCreateWithAccount(EmployeeCreate):
     """Create employee master record and linked login account (Admin/HR)."""
-    password: str = Field(min_length=6, max_length=128)
+    password: str = Field(min_length=8, max_length=128)
     role: str = Field(default='Employee', description='Login role: Employee, Worker, or Manager')
 
 

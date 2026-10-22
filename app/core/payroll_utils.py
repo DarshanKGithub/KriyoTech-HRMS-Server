@@ -168,18 +168,31 @@ def send_email(to_email: str, subject: str, body: str, attachment_path: str | No
 
 
 def generate_payslip_pdf_bytes(payslip_data: dict) -> bytes:
-    """Generate PDF payslip and return bytes."""
-    try:
-        from weasyprint import HTML, CSS
-        from io import BytesIO
-        
-        html_content = generate_payslip_html(payslip_data)
-        html_obj = HTML(string=html_content)
-        pdf_bytes = html_obj.write_pdf()
-        return pdf_bytes
-    except ImportError:
-        print("Warning: weasyprint not installed. Using HTML fallback.")
-        return generate_payslip_html(payslip_data).encode('utf-8')
-    except Exception as e:
-        print(f"Error generating PDF: {e}")
-        return None
+    """Create a real, printable PDF. Never return HTML as application/pdf."""
+    from io import BytesIO
+    from xml.sax.saxutils import escape
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+    output=BytesIO()
+    doc=SimpleDocTemplate(output,pagesize=A4,rightMargin=42,leftMargin=42,topMargin=40,bottomMargin=40)
+    styles=getSampleStyleSheet()
+    rows=[Paragraph('KriyoHR | Payslip',styles['Title']),Paragraph('by KriyoTech Labs',styles['Normal']),Spacer(1,20)]
+    rows.append(Paragraph(escape(str(payslip_data.get('employee_name','Employee'))),styles['Heading2']))
+    rows.append(Paragraph(f"Period: {payslip_data['month']:02d}/{payslip_data['year']} | Status: {escape(str(payslip_data.get('status','draft')))}",styles['Normal']))
+    rows.append(Paragraph(f"Attendance days: {payslip_data['days_worked']} | Unpaid days: {payslip_data['days_absent']}",styles['Normal']))
+    rows.append(Spacer(1,20))
+    data=[['Component','Type','Amount (INR)']]
+    for item in payslip_data.get('components',[]):
+        data.append([Paragraph(escape(str(item['component_name'])),styles['Normal']),item['component_type'],f"{float(item['amount']):,.2f}"])
+    for label,key in [('Gross earnings','gross_salary'),('Deductions','total_deductions'),('Configured tax','total_tax'),('Net pay','net_salary')]:
+        data.append([label,'',f"{float(payslip_data[key]):,.2f}"])
+    table=Table(data,colWidths=[260,100,145],repeatRows=1)
+    table.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#183e32')),('TEXTCOLOR',(0,0),(-1,0),colors.white),('FONTNAME',(0,0),(-1,0),'Helvetica-Bold'),('ALIGN',(-1,1),(-1,-1),'RIGHT'),('PADDING',(0,0),(-1,-1),9),('LINEBELOW',(0,0),(-1,-1),.3,colors.HexColor('#dce5e0')),('BACKGROUND',(0,-1),(-1,-1),colors.HexColor('#e8f1e9'))]))
+    rows.extend([table,Spacer(1,24),Paragraph('Earnings use the configured workweek, published holidays, recorded attendance and approved paid leave. This document does not confirm a bank transfer.',styles['Normal'])])
+    doc.build(rows)
+    value=output.getvalue()
+    if not value.startswith(b'%PDF-'):
+        raise RuntimeError('PDF generation failed')
+    return value

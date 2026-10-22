@@ -1,4 +1,5 @@
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from app.services.auth_service import resolve_employee_id
+from app.http import Router, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 from typing import Optional
 
@@ -37,7 +38,7 @@ from app.services.advanced_attendance_service import (
     reject_comp_off,
 )
 
-router = APIRouter()
+router = Router()
 
 # --- Timesheet Routes ---
 
@@ -48,11 +49,11 @@ def create_timesheet_endpoint(
     db: Session = Depends(get_db)
 ):
     """Create a timesheet entry."""
-    if payload.employee_id != user.id and not has_permission(user.role, 'manage_attendance'):
+    if payload.employee_id != resolve_employee_id(user, db) and not has_permission(user.role, 'manage_attendance'):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cannot create timesheet for other employees")
     
     ts = create_timesheet(payload, db)
-    return TimesheetPublic.model_validate(ts)
+    return TimesheetPublic.model_validate(ts, from_attributes=True)
 
 
 @router.get('/timesheets', response_model=PaginatedTimesheets)
@@ -65,16 +66,16 @@ def list_timesheets(
     db: Session = Depends(get_db)
 ):
     """List timesheets."""
-    if employee_id and employee_id != user.id and not has_permission(user.role, 'view_attendance'):
+    if employee_id and employee_id != resolve_employee_id(user, db) and not has_permission(user.role, 'view_attendance'):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cannot view other employees timesheets")
 
     if not employee_id and not has_permission(user.role, 'view_attendance'):
-        employee_id = user.id
+        employee_id = resolve_employee_id(user, db)
 
     items, total = get_timesheets(db, employee_id, status_filter, page, size)
     
     return PaginatedTimesheets(
-        items=[TimesheetPublic.model_validate(i) for i in items],
+        items=[TimesheetPublic.model_validate(i, from_attributes=True) for i in items],
         total=total,
         page=page,
         size=size
@@ -90,7 +91,7 @@ def update_timesheet_endpoint(
 ):
     """Update a timesheet entry (only Draft status)."""
     ts = update_timesheet(ts_id, payload, user.id, db)
-    return TimesheetPublic.model_validate(ts)
+    return TimesheetPublic.model_validate(ts, from_attributes=True)
 
 
 # --- Overtime Request Routes ---
@@ -102,11 +103,11 @@ def create_overtime_endpoint(
     db: Session = Depends(get_db)
 ):
     """Create an overtime request."""
-    if payload.employee_id != user.id and not has_permission(user.role, 'manage_attendance'):
+    if payload.employee_id != resolve_employee_id(user, db) and not has_permission(user.role, 'manage_attendance'):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cannot create overtime for other employees")
     
     ot = create_overtime_request(payload, db)
-    return OvertimeRequestPublic.model_validate(ot)
+    return OvertimeRequestPublic.model_validate(ot, from_attributes=True)
 
 
 @router.get('/overtime-requests', response_model=PaginatedOvertimeRequests)
@@ -119,16 +120,16 @@ def list_overtime(
     db: Session = Depends(get_db)
 ):
     """List overtime requests."""
-    if employee_id and employee_id != user.id and not has_permission(user.role, 'view_attendance'):
+    if employee_id and employee_id != resolve_employee_id(user, db) and not has_permission(user.role, 'view_attendance'):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cannot view other employees overtime")
 
     if not employee_id and not has_permission(user.role, 'view_attendance'):
-        employee_id = user.id
+        employee_id = resolve_employee_id(user, db)
 
     items, total = get_overtime_requests(db, employee_id, status_filter, page, size)
     
     return PaginatedOvertimeRequests(
-        items=[OvertimeRequestPublic.model_validate(i) for i in items],
+        items=[OvertimeRequestPublic.model_validate(i, from_attributes=True) for i in items],
         total=total,
         page=page,
         size=size
@@ -143,7 +144,7 @@ def approve_overtime_endpoint(
 ):
     """Approve an overtime request."""
     ot = approve_overtime(ot_id, user.id, db)
-    return OvertimeRequestPublic.model_validate(ot)
+    return OvertimeRequestPublic.model_validate(ot, from_attributes=True)
 
 
 @router.post('/overtime-requests/{ot_id}/reject', response_model=OvertimeRequestPublic)
@@ -154,7 +155,7 @@ def reject_overtime_endpoint(
 ):
     """Reject an overtime request."""
     ot = reject_overtime(ot_id, user.id, db)
-    return OvertimeRequestPublic.model_validate(ot)
+    return OvertimeRequestPublic.model_validate(ot, from_attributes=True)
 
 
 # --- Comp-Off Request Routes ---
@@ -166,11 +167,11 @@ def create_comp_off_endpoint(
     db: Session = Depends(get_db)
 ):
     """Create a comp-off request."""
-    if payload.employee_id != user.id and not has_permission(user.role, 'manage_attendance'):
+    if payload.employee_id != resolve_employee_id(user, db) and not has_permission(user.role, 'manage_attendance'):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cannot create comp-off for other employees")
     
     co = create_comp_off_request(payload, db)
-    return CompOffRequestPublic.model_validate(co)
+    return CompOffRequestPublic.model_validate(co, from_attributes=True)
 
 
 @router.get('/comp-off-requests', response_model=PaginatedCompOffRequests)
@@ -183,16 +184,16 @@ def list_comp_off(
     db: Session = Depends(get_db)
 ):
     """List comp-off requests."""
-    if employee_id and employee_id != user.id and not has_permission(user.role, 'view_attendance'):
+    if employee_id and employee_id != resolve_employee_id(user, db) and not has_permission(user.role, 'view_attendance'):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cannot view other employees comp-off")
 
     if not employee_id and not has_permission(user.role, 'view_attendance'):
-        employee_id = user.id
+        employee_id = resolve_employee_id(user, db)
 
     items, total = get_comp_off_requests(db, employee_id, status_filter, page, size)
     
     return PaginatedCompOffRequests(
-        items=[CompOffRequestPublic.model_validate(i) for i in items],
+        items=[CompOffRequestPublic.model_validate(i, from_attributes=True) for i in items],
         total=total,
         page=page,
         size=size
@@ -207,7 +208,7 @@ def approve_comp_off_endpoint(
 ):
     """Approve a comp-off request."""
     co = approve_comp_off(co_id, user.id, db)
-    return CompOffRequestPublic.model_validate(co)
+    return CompOffRequestPublic.model_validate(co, from_attributes=True)
 
 
 @router.post('/comp-off-requests/{co_id}/reject', response_model=CompOffRequestPublic)
@@ -218,7 +219,7 @@ def reject_comp_off_endpoint(
 ):
     """Reject a comp-off request."""
     co = reject_comp_off(co_id, user.id, db)
-    return CompOffRequestPublic.model_validate(co)
+    return CompOffRequestPublic.model_validate(co, from_attributes=True)
 
 
 # --- Regularization Routes ---
@@ -230,11 +231,11 @@ def request_regularization(
     db: Session = Depends(get_db)
 ):
     """Request attendance regularization."""
-    if payload.employee_id != user.id and not has_permission(user.role, 'manage_attendance'):
+    if payload.employee_id != resolve_employee_id(user, db) and not has_permission(user.role, 'manage_attendance'):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cannot request for other employees")
     
     reg = create_attendance_regularization(payload, db)
-    return AttendanceRegularizationPublic.model_validate(reg)
+    return AttendanceRegularizationPublic.model_validate(reg, from_attributes=True)
 
 
 @router.get('/regularizations', response_model=PaginatedAttendanceRegularizations)
@@ -247,16 +248,16 @@ def list_regularizations(
     db: Session = Depends(get_db)
 ):
     """List regularizations."""
-    if employee_id and employee_id != user.id and not has_permission(user.role, 'view_attendance'):
+    if employee_id and employee_id != resolve_employee_id(user, db) and not has_permission(user.role, 'view_attendance'):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cannot view other employees regularizations")
 
     if not employee_id and not has_permission(user.role, 'view_attendance'):
-        employee_id = user.id
+        employee_id = resolve_employee_id(user, db)
 
     items, total = get_regularizations(db, employee_id, status_filter, page, size)
     
     return PaginatedAttendanceRegularizations(
-        items=[AttendanceRegularizationPublic.model_validate(i) for i in items],
+        items=[AttendanceRegularizationPublic.model_validate(i, from_attributes=True) for i in items],
         total=total,
         page=page,
         size=size
@@ -271,7 +272,7 @@ def approve_regularization_endpoint(
 ):
     """Approve a regularization request."""
     reg = approve_regularization(reg_id, user.id, db)
-    return AttendanceRegularizationPublic.model_validate(reg)
+    return AttendanceRegularizationPublic.model_validate(reg, from_attributes=True)
 
 
 @router.post('/regularizations/{reg_id}/reject', response_model=AttendanceRegularizationPublic)
@@ -282,7 +283,7 @@ def reject_regularization_endpoint(
 ):
     """Reject a regularization request."""
     reg = reject_regularization(reg_id, user.id, db)
-    return AttendanceRegularizationPublic.model_validate(reg)
+    return AttendanceRegularizationPublic.model_validate(reg, from_attributes=True)
 
 # --- Biometric & Geo-fencing Routes ---
 
@@ -301,7 +302,7 @@ def sync_biometric_log(
     db.add(log)
     db.commit()
     db.refresh(log)
-    return BiometricLogPublic.model_validate(log)
+    return BiometricLogPublic.model_validate(log, from_attributes=True)
 
 @router.post('/geo-attendance/check-in')
 def geo_check_in(
@@ -312,31 +313,17 @@ def geo_check_in(
     db: Session = Depends(get_db)
 ):
     """Check-in using GPS location and optional Face ID."""
-    today = datetime.now(timezone.utc).date()
-    attendance = db.query(Attendance).filter(Attendance.employee_id == user.id, Attendance.attendance_date == today).first()
-    
-    if attendance and attendance.check_in_time:
-        raise HTTPException(status_code=400, detail="Already checked in today")
-        
-    if not attendance:
-        attendance = Attendance(employee_id=user.id, attendance_date=today, status='present')
-        db.add(attendance)
-        
-    attendance.check_in_time = datetime.now(timezone.utc)
-    # Storing geo-data directly in the BiometricLog for tracking
-    geo_log = BiometricLog(
-        device_id="mobile-gps",
-        employee_id=user.id,
-        timestamp=datetime.now(timezone.utc),
-        log_type='IN',
-        latitude=latitude,
-        longitude=longitude,
-        image_url=image_url
-    )
-    db.add(geo_log)
-    db.commit()
-    db.refresh(attendance)
-    return {"status": "success", "check_in_time": attendance.check_in_time}
+    from app.core.business_time import business_today
+    from app.schemas.attendance import CheckInRequest
+    from app.services.attendance_service import check_in
+    employee_id = resolve_employee_id(user, db)
+    if not employee_id:
+        raise HTTPException(403, 'A linked employee profile is required')
+    if not (-90 <= latitude <= 90 and -180 <= longitude <= 180):
+        raise HTTPException(422, 'Invalid GPS coordinates')
+    attendance = check_in(CheckInRequest(employee_id=employee_id, attendance_date=business_today(db,user.tenant_id), latitude=latitude, longitude=longitude), db, tenant_id=user.tenant_id)
+    return {'status':'success','check_in_time':attendance.check_in_time}
+
 
 # --- Roster Management ---
 
@@ -353,7 +340,7 @@ def create_roster(
     db.add(roster)
     db.commit()
     db.refresh(roster)
-    return RosterPublic.model_validate(roster)
+    return RosterPublic.model_validate(roster, from_attributes=True)
 
 @router.post('/roster-entries', response_model=RosterEntryPublic)
 def add_roster_entry(
@@ -365,5 +352,5 @@ def add_roster_entry(
     db.add(entry)
     db.commit()
     db.refresh(entry)
-    return RosterEntryPublic.model_validate(entry)
+    return RosterEntryPublic.model_validate(entry, from_attributes=True)
 

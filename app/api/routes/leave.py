@@ -1,8 +1,9 @@
+from app.services.auth_service import resolve_employee_id
 """API routes for Leave Management (Phase 5)."""
 from datetime import date
 import json
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from app.http import Router, Depends, File, HTTPException, Query, UploadFile, status
 from sqlalchemy.orm import Session
 
 from app.core.rbac import get_current_user, has_permission
@@ -33,7 +34,7 @@ from app.services.leave_service import (
     create_holiday,
     delete_holiday,
 )
-router = APIRouter()
+router = Router()
 
 
 @router.get('/types', response_model=list)
@@ -63,7 +64,7 @@ def request_leave_endpoint(
     db: Session = Depends(get_db),
 ) -> LeaveRequestPublic:
     # user.id is user.id; map to employee id: login returns employee_id in user payload when available
-    employee_id = getattr(user, 'id', None)
+    employee_id = resolve_employee_id(user, db)
     # create_leave_request will validate employee existence
     lr = create_leave_request(employee_id, payload, db, tenant_id=user.tenant_id)
     return LeaveRequestPublic.model_validate({
@@ -97,11 +98,11 @@ def list_requests_endpoint(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> PaginatedLeaveRequests:
-    if employee_id and employee_id != user.id and not has_permission(user.role, 'view_leave'):
+    if employee_id and employee_id != resolve_employee_id(user, db) and not has_permission(user.role, 'view_leave'):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail='Cannot view other employees requests')
 
     if not employee_id and not has_permission(user.role, 'view_leave'):
-        employee_id = user.id
+        employee_id = resolve_employee_id(user, db)
 
     items, total = list_leave_requests(db, tenant_id=user.tenant_id, employee_id=employee_id, status_filter=status, page=page, size=size)
     return PaginatedLeaveRequests(
@@ -143,7 +144,7 @@ def list_team_requests_endpoint(
     if user.role not in ['Admin', 'HR', 'Manager']:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail='Insufficient privileges')
 
-    manager_id = user.id
+    manager_id = resolve_employee_id(user, db)
     items, total = list_leave_requests(db, tenant_id=user.tenant_id, manager_id=manager_id, status_filter=status, page=page, size=size)
     return PaginatedLeaveRequests(
         items=[LeaveRequestPublic.model_validate({
@@ -179,7 +180,7 @@ def get_request_endpoint(
     db: Session = Depends(get_db),
 ):
     lr = get_leave_request(request_id, db, tenant_id=user.tenant_id)
-    if lr.employee_id != user.id and not has_permission(user.role, 'view_leave'):
+    if lr.employee_id != resolve_employee_id(user, db) and not has_permission(user.role, 'view_leave'):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail='Cannot view other employees requests')
 
     return LeaveRequestPublic.model_validate({
@@ -220,7 +221,7 @@ def approve_request_endpoint(
         # ensure manager relationship (employee.manager_id == user.id)
         from app.db.models import Employee
         emp = db.query(Employee).filter(Employee.id == lr.employee_id).first()
-        if not emp or emp.manager_id != user.id:
+        if not emp or emp.manager_id != resolve_employee_id(user, db):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail='Not authorized to approve this request')
 
     updated = approve_leave(request_id, user.id, payload.approve, db, tenant_id=user.tenant_id)
@@ -259,7 +260,7 @@ def bulk_approve_requests_endpoint(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='request_ids cannot be empty')
 
     result = bulk_approve_leave(payload.request_ids, user.id, payload.approve, db, tenant_id=user.tenant_id)
-    return BulkApproveResult.model_validate(result)
+    return BulkApproveResult.model_validate(result, from_attributes=True)
 
 
 @router.get('/balances', response_model=list[LeaveBalancePublic])
@@ -268,11 +269,11 @@ def balances_endpoint(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    if employee_id and employee_id != user.id and not has_permission(user.role, 'view_leave'):
+    if employee_id and employee_id != resolve_employee_id(user, db) and not has_permission(user.role, 'view_leave'):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail='Cannot view other employees balances')
 
     if not employee_id:
-        employee_id = user.id
+        employee_id = resolve_employee_id(user, db)
 
     balances = get_leave_balances(employee_id, db)
     out = []
@@ -297,11 +298,11 @@ def balances_with_details_endpoint(
     db: Session = Depends(get_db),
 ):
     """Get leave balances with leave type details (name, description)."""
-    if employee_id and employee_id != user.id and not has_permission(user.role, 'view_leave'):
+    if employee_id and employee_id != resolve_employee_id(user, db) and not has_permission(user.role, 'view_leave'):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail='Cannot view other employees balances')
 
     if not employee_id:
-        employee_id = user.id
+        employee_id = resolve_employee_id(user, db)
 
     balances = get_leave_balances(employee_id, db)
     out = []
@@ -376,7 +377,7 @@ def delete_holiday_endpoint(
 
 
 @router.post('/requests/{request_id}/upload')
-async def upload_leave_attachment(
+def upload_leave_attachment(
     request_id: str,
     file: UploadFile = File(...),
     user: User = Depends(get_current_user),
@@ -385,11 +386,11 @@ async def upload_leave_attachment(
     """Upload an attachment file for a leave request."""
     # Verify the leave request exists and belongs to the user or user is authorized to approve
     lr = get_leave_request(request_id, db, tenant_id=user.tenant_id)
-    if lr.employee_id != user.id and not has_permission(user.role, 'approve_leave'):
+    if lr.employee_id != resolve_employee_id(user, db) and not has_permission(user.role, 'approve_leave'):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail='Cannot upload files for other employees')
 
     # Save the file
-    content = await file.read()
+    content = file.file.read()
     file_path = save_leave_attachment(request_id, file.filename or 'file', content)
     
     return {'file_path': file_path, 'filename': file.filename}
@@ -432,7 +433,7 @@ def get_leave_history(
     from app.db.models import AuditLog
     # Ensure user can view this request
     lr = get_leave_request(request_id, db, tenant_id=user.tenant_id)
-    if lr.employee_id != user.id and not has_permission(user.role, 'view_leave'):
+    if lr.employee_id != resolve_employee_id(user, db) and not has_permission(user.role, 'view_leave'):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail='Cannot view other employees requests')
 
     logs = db.query(AuditLog).filter(

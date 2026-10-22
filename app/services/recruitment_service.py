@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Iterable
 
-from fastapi import HTTPException
+from app.http import HTTPException
 from sqlalchemy.orm import Session
 
 from app.db.models import Candidate, Interview, JobApplication, JobPosting

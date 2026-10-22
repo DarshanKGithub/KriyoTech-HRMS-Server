@@ -1,13 +1,14 @@
-fastapi
+Django>=5.2,<5.3
 uvicorn[standard]
 python-jose[cryptography]
 passlib
 pydantic-settings
 SQLAlchemy
 psycopg[binary]
-python-multipart
 openpyxl
 alembic
 razorpay
 stripe
-apscheduler
+apscheduler>=3.11,<4
+
+reportlab>=4.4,<5

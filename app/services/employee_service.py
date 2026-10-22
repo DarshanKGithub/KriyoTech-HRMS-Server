@@ -2,12 +2,12 @@ from datetime import date
 from typing import List, Tuple
 from sqlalchemy import select, func
 from sqlalchemy.orm import Session
-from fastapi import HTTPException, status
+from app.http import HTTPException, status
 from uuid import uuid4
 from sqlalchemy import text
 
 from app.core.security import hash_password
-from app.db.models import Employee, User, LeaveType, LeaveBalance
+from app.db.models import Employee, User, LeaveType, LeaveBalance, Department, Designation
 from app.schemas.employee import EmployeeCreate, EmployeeCreateWithAccount, EmployeeUpdate, ALLOWED_PROVISION_ROLES
 
 
@@ -19,7 +19,8 @@ def list_employees(db: Session, tenant_id: str | None = None) -> List[Employee]:
 
 
 def search_employees(db: Session, page: int = 1, size: int = 20, q: str | None = None,
-                     department_id: str | None = None, designation_id: str | None = None, tenant_id: str | None = None, is_super_admin: bool = False) -> Tuple[List[Employee], int]:
+                     department_id: str | None = None, designation_id: str | None = None, tenant_id: str | None = None, is_super_admin: bool = False,
+                     sort_by: str = 'full_name', sort_dir: str = 'asc', is_active: bool | None = None, manager_id: str | None = None) -> Tuple[List[Employee], int]:
     """Return (items, total) for employees matching optional filters with pagination."""
     stmt = select(Employee)
     filters = []
@@ -37,6 +38,10 @@ def search_employees(db: Session, page: int = 1, size: int = 20, q: str | None =
         filters.append(Employee.department_id == department_id)
     if designation_id:
         filters.append(Employee.designation_id == designation_id)
+    if is_active is not None:
+        filters.append(Employee.is_active == is_active)
+    if manager_id:
+        filters.append(Employee.manager_id == manager_id)
 
     if filters:
         for f in filters:
@@ -44,7 +49,9 @@ def search_employees(db: Session, page: int = 1, size: int = 20, q: str | None =
 
     total = db.scalar(select(func.count()).select_from(stmt.subquery()))
 
-    items = db.scalars(stmt.order_by(Employee.full_name).offset((page - 1) * size).limit(size)).all()
+    sort_column = {'full_name': Employee.full_name, 'email': Employee.email, 'is_active': Employee.is_active}.get(sort_by, Employee.full_name)
+    order = sort_column.desc() if sort_dir == 'desc' else sort_column.asc()
+    items = db.scalars(stmt.order_by(order, Employee.id).offset((page - 1) * size).limit(size)).all()
     return items, int(total or 0)
 
 
@@ -58,12 +65,14 @@ def get_employee(employee_id: str, db: Session, tenant_id: str | None = None) ->
     return emp
 
 
-def _validate_manager_for_new_employee(db: Session, manager_id: str | None, new_id: str) -> None:
+def _validate_manager_for_new_employee(db: Session, manager_id: str | None, new_id: str, tenant_id: str | None = None) -> None:
     if not manager_id:
         return
     mgr = db.scalar(select(Employee).where(Employee.id == manager_id))
     if not mgr:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Manager not found')
+    if tenant_id and mgr.tenant_id != tenant_id:
+        raise HTTPException(status_code=400, detail='Manager must belong to the same organization')
 
     current = manager_id
     seen: set[str] = set()
@@ -104,6 +113,17 @@ def _employee_from_payload(payload: EmployeeCreate, employee_id: str, tenant_id:
         joining_date=payload.joining_date,
         date_of_confirmation=payload.date_of_confirmation,
     )
+
+
+def _validate_org_links(payload, db, tenant_id):
+    if not tenant_id:
+        return
+    for field, model in (('department_id', Department), ('designation_id', Designation)):
+        value = getattr(payload, field, None)
+        if value:
+            record = db.get(model, value)
+            if not record or record.tenant_id != tenant_id:
+                raise HTTPException(400, f'{field} must belong to the same organization')
 
 
 def _provision_leave_balances(employee_id: str, db: Session) -> None:
@@ -155,7 +175,7 @@ def _audit_employee_action(db: Session, actor_id: str | None, action: str, emp: 
 def create_employee(payload: EmployeeCreate, db: Session, actor_id: str | None = None, tenant_id: str | None = None) -> Employee:
     """Create employee with linked login (preferred for Admin/HR provisioning)."""
     if isinstance(payload, EmployeeCreateWithAccount):
-        return create_employee_with_account(payload, db, actor_id)
+        return create_employee_with_account(payload, db, actor_id, tenant_id=tenant_id)
 
     # Legacy path: employee record only (no login) — kept for backward compatibility in tests
     email = payload.email.lower().strip()
@@ -163,7 +183,8 @@ def create_employee(payload: EmployeeCreate, db: Session, actor_id: str | None =
     if existing:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Employee with this email exists')
     new_id = str(uuid4())
-    _validate_manager_for_new_employee(db, payload.manager_id, new_id)
+    _validate_manager_for_new_employee(db, payload.manager_id, new_id, tenant_id)
+    _validate_org_links(payload, db, tenant_id)
     emp = _employee_from_payload(payload, new_id, tenant_id)
     db.add(emp)
     db.commit()
@@ -195,7 +216,8 @@ def create_employee_with_account(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='An employee with this email already exists')
 
     new_id = str(uuid4())
-    _validate_manager_for_new_employee(db, payload.manager_id, new_id)
+    _validate_manager_for_new_employee(db, payload.manager_id, new_id, tenant_id)
+    _validate_org_links(payload, db, tenant_id)
 
     user = User(
         id=new_id,
@@ -230,11 +252,12 @@ def update_employee(employee_id: str, payload: EmployeeUpdate, db: Session, acto
         emp.full_name = payload.full_name
         if linked_user:
             linked_user.full_name = payload.full_name.strip()
-    if payload.department_id is not None:
+    _validate_org_links(payload, db, tenant_id)
+    if 'department_id' in payload.model_fields_set:
         emp.department_id = payload.department_id
-    if payload.designation_id is not None:
+    if 'designation_id' in payload.model_fields_set:
         emp.designation_id = payload.designation_id
-    if payload.manager_id is not None:
+    if 'manager_id' in payload.model_fields_set:
         # manager must exist
         if payload.manager_id == emp.id:
             raise HTTPException(
@@ -247,6 +270,8 @@ def update_employee(employee_id: str, payload: EmployeeUpdate, db: Session, acto
             mgr = db.scalar(select(Employee).where(Employee.id == payload.manager_id))
             if not mgr:
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Manager not found')
+            if tenant_id and mgr.tenant_id != tenant_id:
+                raise HTTPException(400, 'Manager must belong to the same organization')
 
         # detect cycles: walk up manager chain to ensure employee_id is not encountered
         current = payload.manager_id

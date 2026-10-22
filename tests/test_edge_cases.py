@@ -1,6 +1,7 @@
 """Comprehensive edge case tests for employee, dashboard, and audit services."""
 
 import pytest
+from datetime import datetime, timedelta, timezone
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -10,7 +11,7 @@ from app.services.employee_service import create_employee, update_employee, dele
 from app.services.dashboard_service import get_dashboard_summary
 from app.services.audit_service import list_audit_logs
 from app.schemas.employee import EmployeeCreate, EmployeeUpdate
-from fastapi import HTTPException
+from app.http import HTTPException
 
 
 @pytest.fixture()
@@ -326,9 +327,11 @@ def test_audit_log_filter_by_actor_id(db_session):
 
 def test_audit_log_ordering_newest_first(db_session):
     """Test that audit logs are ordered with newest first."""
-    log1 = AuditLog(actor_id='a', action='CREATE', object_type='Employee', object_id='1')
-    log2 = AuditLog(actor_id='a', action='UPDATE', object_type='Employee', object_id='1')
-    log3 = AuditLog(actor_id='a', action='DELETE', object_type='Employee', object_id='1')
+    # Explicit times avoid equal clock ticks on Windows and fast batch inserts.
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    log1 = AuditLog(actor_id='a', action='CREATE', object_type='Employee', object_id='1', created_at=start)
+    log2 = AuditLog(actor_id='a', action='UPDATE', object_type='Employee', object_id='1', created_at=start + timedelta(seconds=1))
+    log3 = AuditLog(actor_id='a', action='DELETE', object_type='Employee', object_id='1', created_at=start + timedelta(seconds=2))
 
     db_session.add_all([log1, log2, log3])
     db_session.commit()

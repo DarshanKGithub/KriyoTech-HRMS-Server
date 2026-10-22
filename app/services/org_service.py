@@ -4,45 +4,54 @@ from sqlalchemy.orm import Session
 
 from app.db.models import Department, Designation
 from app.schemas.organization import DepartmentCreate, DesignationCreate
-from fastapi import HTTPException, status
+from app.http import HTTPException, status
 
 
-def list_departments(db: Session) -> List[Department]:
-    return db.scalars(select(Department).order_by(Department.name)).all()
+def list_departments(db: Session, tenant_id=None, scoped=False) -> List[Department]:
+    query = select(Department)
+    if scoped:
+        query = query.where(Department.tenant_id == tenant_id)
+    return db.scalars(query.order_by(Department.name)).all()
 
 
-def create_department(payload: DepartmentCreate, db: Session) -> Department:
+def create_department(payload: DepartmentCreate, db: Session, tenant_id=None) -> Department:
     existing = db.scalar(select(Department).where(Department.name == payload.name))
     if existing:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Department already exists')
-    dept = Department(name=payload.name)
+    dept = Department(name=payload.name, tenant_id=tenant_id)
     db.add(dept)
     db.commit()
     db.refresh(dept)
     return dept
 
 
-def list_designations(db: Session) -> List[Designation]:
-    return db.scalars(select(Designation).order_by(Designation.name)).all()
+def list_designations(db: Session, tenant_id=None, scoped=False) -> List[Designation]:
+    query = select(Designation)
+    if scoped:
+        query = query.where(Designation.tenant_id == tenant_id)
+    return db.scalars(query.order_by(Designation.name)).all()
 
 
-def create_designation(payload: DesignationCreate, db: Session) -> Designation:
+def create_designation(payload: DesignationCreate, db: Session, tenant_id=None) -> Designation:
     existing = db.scalar(select(Designation).where(Designation.name == payload.name))
     if existing:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Designation already exists')
-    des = Designation(name=payload.name)
+    des = Designation(name=payload.name, tenant_id=tenant_id)
     db.add(des)
     db.commit()
     db.refresh(des)
     return des
 
 
-def get_org_hierarchy(db: Session) -> List[dict]:
+def get_org_hierarchy(db: Session, tenant_id=None, scoped=False) -> List[dict]:
     from app.db.models import Employee
-    employees = db.query(Employee, Department, Designation)\
+    query = db.query(Employee, Department, Designation)\
         .outerjoin(Department, Employee.department_id == Department.id)\
         .outerjoin(Designation, Employee.designation_id == Designation.id)\
-        .filter(Employee.is_active == True).all()
+        .filter(Employee.is_active == True)
+    if scoped:
+        query = query.filter(Employee.tenant_id == tenant_id)
+    employees = query.all()
 
     nodes = {}
     for emp, dept, desig in employees:

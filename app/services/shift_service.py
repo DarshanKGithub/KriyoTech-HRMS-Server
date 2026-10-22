@@ -10,7 +10,7 @@ from app.schemas.attendance import (
     EmployeeShiftAssignmentCreate,
     EmployeeShiftAssignmentUpdate,
 )
-from fastapi import HTTPException, status
+from app.http import HTTPException, status
 
 
 def create_shift(payload: ShiftCreate, db: Session) -> Shift:

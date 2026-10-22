@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import HTTPException, status
+from app.http import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -103,42 +103,18 @@ def to_public_user(user: User, db: Session | None = None) -> UserPublic:
         except Exception:
             emp_id = None
 
-    tenant_id: str | None = None
-    tenant_obj: dict | None = None
-    entitlements: list[str] = []
-
-    if db is not None:
-        try:
-            # Prefer explicit binding via `user.tenant_id` when available.
-            if getattr(user, 'tenant_id', None):
-                t = db.scalar(select(Tenant).where(Tenant.id == user.tenant_id))
-                if t:
-                    tenant_id = t.id
-                    tenant_obj = {"id": t.id, "name": t.name, "domain": t.domain}
-                    try:
-                        rows = db.query(TenantFeature).filter(TenantFeature.tenant_id == t.id, TenantFeature.enabled == True).all()
-                        entitlements = [r.feature_key for r in rows]
-                    except Exception:
-                        entitlements = []
-            else:
-                # Fallback: try resolving tenant by email domain (simple mapping). Tenants should set `domain`.
-                parts = user.email.split('@')
-                if len(parts) == 2:
-                    domain = parts[1].lower()
-                    t = db.scalar(select(Tenant).where(Tenant.domain == domain))
-                    if t:
-                        tenant_id = t.id
-                        tenant_obj = {"id": t.id, "name": t.name, "domain": t.domain}
-                        # Load tenant feature flags
-                        try:
-                            rows = db.query(TenantFeature).filter(TenantFeature.tenant_id == t.id, TenantFeature.enabled == True).all()
-                            entitlements = [r.feature_key for r in rows]
-                        except Exception:
-                            entitlements = []
-        except Exception:
-            tenant_id = None
-            tenant_obj = None
-            entitlements = []
+    from datetime import date
+    from app.db.models import Subscription
+    tenant_id = user.tenant_id
+    tenant_obj = None
+    entitlements = []
+    if db is not None and tenant_id:
+        tenant = db.scalar(select(Tenant).where(Tenant.id==tenant_id))
+        if tenant:
+            tenant_obj={'id':tenant.id,'name':tenant.name,'domain':tenant.domain}
+            active = db.scalar(select(Subscription.id).where(Subscription.tenant_id==tenant_id,Subscription.status=='active',Subscription.starts_at<=date.today(),(Subscription.ends_at.is_(None)|(Subscription.ends_at>=date.today()))))
+            if active:
+                entitlements=list(db.scalars(select(TenantFeature.feature_key).where(TenantFeature.tenant_id==tenant_id,TenantFeature.enabled.is_(True))))
 
     return UserPublic(
         id=user.id,
@@ -169,21 +145,26 @@ def authenticate_user(*, email: str, password: str, db: Session, role: str | Non
 
 
 def create_login_response(user: User, db: Session | None = None) -> LoginResponse:
+    from app.core.ownership import bind_actor
+    bind_actor(db, user)
     access_token, expires_at = create_access_token(subject=user.email, user_id=user.id, role=user.role)
     expires_in = int((expires_at - datetime.now(timezone.utc)).total_seconds())
     return LoginResponse(access_token=access_token, expires_in=max(expires_in, 1), user=to_public_user(user, db=db))
 
 
 def get_user_from_token(token: str, db: Session) -> User:
+    db.info.pop('actor', None)
     payload = decode_token_payload(token)
     subject = payload.get('sub')
     if not subject:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail='Token missing subject')
 
     user = db.scalar(select(User).where(User.email == str(subject).lower()))
-    if not user:
+    if not user or not user.is_active:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail='User not found')
 
+    from app.core.ownership import bind_actor
+    bind_actor(db, user)
     return user
 
 
@@ -216,67 +197,6 @@ def change_password(user: User, old_password: str, new_password: str, *, db: Ses
     db.commit()
 
 def register_tenant(payload, db: Session) -> User:
-    from app.db.models import Tenant, User, Employee, Subscription, Plan, TenantFeature
-    from app.core.security import hash_password
-    import uuid
-    from datetime import datetime, timezone
-    
-    email = payload.admin_email.lower().strip()
-    if db.scalar(select(User).where(User.email == email)):
-        raise HTTPException(status_code=400, detail='User already exists with this email')
-        
-    tenant_id = str(uuid.uuid4())
-    domain = email.split('@')[1] if '@' in email else None
-    new_tenant = Tenant(
-        id=tenant_id,
-        name=payload.company_name.strip(),
-        domain=domain,
-        is_active=True
-    )
-    db.add(new_tenant)
-    
-    user_id = str(uuid.uuid4())
-    new_user = User(
-        id=user_id,
-        tenant_id=tenant_id,
-        full_name=payload.admin_name.strip(),
-        email=email,
-        password_hash=hash_password(payload.password),
-        role='CEO',
-        is_active=True
-    )
-    db.add(new_user)
-    
-    new_employee = Employee(
-        id=user_id,
-        tenant_id=tenant_id,
-        full_name=payload.admin_name.strip(),
-        email=email,
-        is_active=True
-    )
-    db.add(new_employee)
-    
-    # Assign default plan
-    basic_plan = db.scalar(select(Plan).where(Plan.name == 'Basic Plan'))
-    if basic_plan:
-        sub = Subscription(
-            id=str(uuid.uuid4()),
-            tenant_id=tenant_id,
-            plan_id=basic_plan.id,
-            status='active',
-            billing_period=basic_plan.billing_period,
-            starts_at=datetime.now(timezone.utc).date()
-        )
-        db.add(sub)
-        # copy features
-        for key in basic_plan.feature_keys:
-            db.add(TenantFeature(
-                id=str(uuid.uuid4()),
-                tenant_id=tenant_id,
-                feature_key=key,
-                enabled=True
-            ))
-            
-    db.commit()
-    db.refresh(new_user)
-    return new_user
+    from app.services.company_service import provision_company
+    tenant, user = provision_company(payload.company_name, None, payload.admin_name, payload.admin_email, payload.password, db)
+    return user

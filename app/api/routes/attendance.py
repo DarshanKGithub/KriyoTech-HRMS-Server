@@ -1,8 +1,9 @@
+from app.services.auth_service import resolve_employee_id
 """API routes for attendance and shift management."""
 
 from datetime import date
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from app.http import Router, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from app.core.rbac import get_current_user, has_permission, require_permissions
@@ -45,14 +46,14 @@ from app.services.attendance_service import (
     delete_attendance,
     get_employee_attendance_summary,
 )
-from fastapi.responses import StreamingResponse
+from app.http import StreamingResponse
 import io
 import csv
 try:
     import openpyxl
 except Exception:
     openpyxl = None
-router = APIRouter()
+router = Router()
 
 
 def _attendance_to_dict(a) -> dict:
@@ -99,7 +100,7 @@ def create_shift_endpoint(
 ) -> ShiftPublic:
     """Create a new shift (Admin/HR only)."""
     shift = create_shift(payload, db)
-    return ShiftPublic.model_validate(shift)
+    return ShiftPublic.model_validate(shift, from_attributes=True)
 
 
 @router.get('/shifts/{shift_id}', response_model=ShiftPublic)
@@ -110,7 +111,7 @@ def get_shift_endpoint(
 ) -> ShiftPublic:
     """Retrieve a shift by ID."""
     shift = get_shift(shift_id, db)
-    return ShiftPublic.model_validate(shift)
+    return ShiftPublic.model_validate(shift, from_attributes=True)
 
 
 @router.get('/shifts', response_model=PaginatedShifts)
@@ -123,7 +124,7 @@ def list_shifts_endpoint(
     """List all shifts with pagination."""
     shifts, total = list_shifts(db, page=page, size=size)
     return PaginatedShifts(
-        items=[ShiftPublic.model_validate(s) for s in shifts],
+        items=[ShiftPublic.model_validate(s, from_attributes=True) for s in shifts],
         total=total,
         page=page,
         size=size,
@@ -146,7 +147,7 @@ def assign_shift_endpoint(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Employee ID mismatch')
 
     assignment = assign_shift_to_employee(payload, db)
-    return EmployeeShiftAssignmentPublic.model_validate(assignment)
+    return EmployeeShiftAssignmentPublic.model_validate(assignment, from_attributes=True)
 
 
 @router.get('/employees/{employee_id}/shift-assignments', response_model=PaginatedEmployeeShiftAssignments)
@@ -160,7 +161,7 @@ def list_employee_shift_assignments_endpoint(
     """List shift assignments for an employee."""
     assignments, total = list_employee_shift_assignments(db, employee_id=employee_id, page=page, size=size)
     return PaginatedEmployeeShiftAssignments(
-        items=[EmployeeShiftAssignmentPublic.model_validate(a) for a in assignments],
+        items=[EmployeeShiftAssignmentPublic.model_validate(a, from_attributes=True) for a in assignments],
         total=total,
         page=page,
         size=size,
@@ -178,7 +179,7 @@ def check_in_endpoint(
 ) -> AttendancePublic:
     """Record check-in for an employee."""
     # Allow self check-in for employees/workers. Others require elevated attendance permission.
-    if payload.employee_id != user.id and not has_permission(user.role, 'approve_attendance'):
+    if payload.employee_id != resolve_employee_id(user, db) and not has_permission(user.role, 'approve_attendance'):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail='Cannot check in for other employees')
 
     attendance = check_in(payload, db, tenant_id=user.tenant_id)
@@ -193,7 +194,7 @@ def check_out_endpoint(
 ) -> AttendancePublic:
     """Record check-out for an employee."""
     # Allow self check-out for employees/workers. Others require elevated attendance permission.
-    if payload.employee_id != user.id and not has_permission(user.role, 'approve_attendance'):
+    if payload.employee_id != resolve_employee_id(user, db) and not has_permission(user.role, 'approve_attendance'):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail='Cannot check out for other employees')
 
     attendance = check_out(payload, db, tenant_id=user.tenant_id)
@@ -207,7 +208,7 @@ def start_break_endpoint(
     db: Session = Depends(get_db),
 ) -> AttendancePublic:
     """Record break start for an employee."""
-    if payload.employee_id != user.id and not has_permission(user.role, 'approve_attendance'):
+    if payload.employee_id != resolve_employee_id(user, db) and not has_permission(user.role, 'approve_attendance'):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail='Cannot start break for other employees')
 
     attendance = start_break(payload, db, tenant_id=user.tenant_id)
@@ -221,7 +222,7 @@ def end_break_endpoint(
     db: Session = Depends(get_db),
 ) -> AttendancePublic:
     """Record break end for an employee."""
-    if payload.employee_id != user.id and not has_permission(user.role, 'approve_attendance'):
+    if payload.employee_id != resolve_employee_id(user, db) and not has_permission(user.role, 'approve_attendance'):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail='Cannot end break for other employees')
 
     attendance = end_break(payload, db, tenant_id=user.tenant_id)
@@ -240,11 +241,11 @@ def list_attendance_endpoint(
 ) -> PaginatedAttendance:
     """List attendance records with optional filters."""
     # Non-elevated users can only view their own attendance.
-    if employee_id and employee_id != user.id and not has_permission(user.role, 'view_attendance'):
+    if employee_id and employee_id != resolve_employee_id(user, db) and not has_permission(user.role, 'view_attendance'):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail='Cannot view other employees attendance')
 
     if not employee_id and not has_permission(user.role, 'view_attendance'):
-        employee_id = user.id
+        employee_id = resolve_employee_id(user, db)
 
     records, total = list_attendance(db, tenant_id=user.tenant_id, employee_id=employee_id, start_date=start_date, end_date=end_date, page=page, size=size)
     return PaginatedAttendance(
@@ -264,7 +265,7 @@ def get_attendance_summary_endpoint(
     db: Session = Depends(get_db),
 ) -> EmployeeAttendanceSummary:
     """Get attendance summary for an employee."""
-    if employee_id != user.id and not has_permission(user.role, 'view_attendance'):
+    if employee_id != resolve_employee_id(user, db) and not has_permission(user.role, 'view_attendance'):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail='Cannot view other employees attendance')
 
     if start_date > end_date:
@@ -281,7 +282,7 @@ def get_attendance_endpoint(
 ) -> AttendancePublic:
     """Retrieve an attendance record by ID."""
     attendance = get_attendance(attendance_id, db, tenant_id=user.tenant_id)
-    if attendance.employee_id != user.id and not has_permission(user.role, 'view_attendance'):
+    if attendance.employee_id != resolve_employee_id(user, db) and not has_permission(user.role, 'view_attendance'):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail='Cannot view other employees attendance')
     return AttendancePublic.model_validate(_attendance_to_dict(attendance))
 
@@ -319,7 +320,7 @@ def export_attendance_endpoint(
     db: Session = Depends(get_db),
 ):
     """Export monthly attendance for an employee. Supports CSV and XLSX (if openpyxl installed)."""
-    if employee_id != user.id and not has_permission(user.role, 'view_attendance'):
+    if employee_id != resolve_employee_id(user, db) and not has_permission(user.role, 'view_attendance'):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail='Cannot export other employee reports')
 
     # build start and end dates for month

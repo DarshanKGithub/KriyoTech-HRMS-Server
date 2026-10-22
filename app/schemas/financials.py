@@ -1,18 +1,19 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional, List
-from datetime import datetime
+from datetime import datetime, date
 
 class SalaryStructureBase(BaseModel):
-    base_salary: float
-    hra: float
-    da: float
-    special_allowance: float
-    pf_percentage: float
-    esi_percentage: float
-    tax_bracket_percentage: float
+    base_salary: float = Field(ge=0)
+    hra: float = Field(ge=0)
+    da: float = Field(ge=0)
+    special_allowance: float = Field(ge=0)
+    pf_percentage: float = Field(ge=0, le=100)
+    esi_percentage: float = Field(ge=0, le=100)
+    tax_bracket_percentage: float = Field(ge=0, le=100)
 
 class SalaryStructureCreate(SalaryStructureBase):
     employee_id: str
+    effective_from: date | None = None
 
 class SalaryStructurePublic(SalaryStructureBase):
     id: str

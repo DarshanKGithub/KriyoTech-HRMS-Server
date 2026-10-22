@@ -1,8 +1,9 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from app.http import Router, Depends, HTTPException, status
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 
-from app.core.rbac import require_permissions
+from app.core.rbac import require_permissions, require_super_admin
 from app.db.database import get_db
 from app.db.models import User
 from app.schemas.auth import RoleUpdateRequest, UserPublic
@@ -33,14 +34,16 @@ from app.schemas.tenancy import (
 from app.db.models import Tenant, Plan, TenantFeature, Subscription, FeaturePackage, FeaturePackageFeature, PlanFeature
 from datetime import datetime, date, timedelta
 
-router = APIRouter()
+router = Router()
 
 
 @router.get('/audit-logs', response_model=PaginatedAuditLogs)
 def audit_logs(page: int = 1, size: int = 20, object_type: str | None = None, actor_id: str | None = None,
                _user: User = Depends(require_permissions('view_audit_logs')), db: Session = Depends(get_db)):
 
-    items, total = list_audit_logs(db=db, page=page, size=size, object_type=object_type, actor_id=actor_id)
+    if _user.role != 'Super Admin' and not _user.tenant_id:
+        raise HTTPException(403, 'An organization assignment is required')
+    items, total = list_audit_logs(db=db, page=page, size=size, object_type=object_type, actor_id=actor_id, tenant_id=_user.tenant_id, platform=_user.role == 'Super Admin')
     return PaginatedAuditLogs(
         items=[AuditLogPublic(
             id=a.id,
@@ -76,6 +79,10 @@ def update_user_role(
     if not target:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='User not found')
 
+    if actor.role != 'Super Admin':
+        if not actor.tenant_id or target.tenant_id != actor.tenant_id or target.role == 'Super Admin' or new_role == 'Super Admin':
+            raise HTTPException(status_code=403, detail='Cannot change roles outside your organization or assign a platform role')
+
     old_role = target.role
     if old_role == new_role:
         return to_public_user(target, db=db)
@@ -105,48 +112,20 @@ def update_user_role(
 
 # --- Tenancy admin endpoints ---
 @router.post('/tenants', response_model=TenantPublic)
-def create_tenant(payload: TenantCreate, actor: User = Depends(require_permissions('manage_settings')), db: Session = Depends(get_db)):
-    from app.core.security import hash_password
-    import uuid
-    from app.db.models import Employee
-
-    t = Tenant(id=str(uuid.uuid4()), name=payload.name.strip(), domain=(payload.domain or None), is_active=True)
-    db.add(t)
-    
-    user_id = str(uuid.uuid4())
-    new_user = User(
-        id=user_id,
-        tenant_id=t.id,
-        full_name=payload.admin_name.strip(),
-        email=payload.admin_email.lower().strip(),
-        password_hash=hash_password(payload.admin_password),
-        role='CEO',
-        is_active=True
-    )
-    db.add(new_user)
-
-    new_employee = Employee(
-        id=user_id,
-        tenant_id=t.id,
-        full_name=payload.admin_name.strip(),
-        email=payload.admin_email.lower().strip(),
-        is_active=True
-    )
-    db.add(new_employee)
-
-    db.commit()
-    db.refresh(t)
-    return TenantPublic(id=t.id, name=t.name, domain=t.domain, is_active=t.is_active)
+def create_tenant(payload: TenantCreate, actor: User = Depends(require_super_admin), db: Session = Depends(get_db)):
+    from app.services.company_service import provision_company
+    tenant, _ = provision_company(payload.name, payload.domain, payload.admin_name, payload.admin_email, payload.admin_password, db)
+    return TenantPublic(id=tenant.id, name=tenant.name, domain=tenant.domain, is_active=tenant.is_active)
 
 
 @router.get('/tenants', response_model=list[TenantPublic])
-def list_tenants(actor: User = Depends(require_permissions('manage_settings')), db: Session = Depends(get_db)):
+def list_tenants(actor: User = Depends(require_super_admin), db: Session = Depends(get_db)):
     rows = db.query(Tenant).all()
     return [TenantPublic(id=r.id, name=r.name, domain=r.domain, is_active=r.is_active) for r in rows]
 
 
 @router.get('/tenants/{tenant_id}', response_model=TenantPublic)
-def get_tenant(tenant_id: str, actor: User = Depends(require_permissions('manage_settings')), db: Session = Depends(get_db)):
+def get_tenant(tenant_id: str, actor: User = Depends(require_super_admin), db: Session = Depends(get_db)):
     t = db.scalar(select(Tenant).where(Tenant.id == tenant_id))
     if not t:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Tenant not found')
@@ -154,7 +133,7 @@ def get_tenant(tenant_id: str, actor: User = Depends(require_permissions('manage
 
 
 @router.patch('/tenants/{tenant_id}', response_model=TenantPublic)
-def update_tenant(tenant_id: str, payload: TenantUpdate, actor: User = Depends(require_permissions('manage_settings')), db: Session = Depends(get_db)):
+def update_tenant(tenant_id: str, payload: TenantUpdate, actor: User = Depends(require_super_admin), db: Session = Depends(get_db)):
     t = db.scalar(select(Tenant).where(Tenant.id == tenant_id))
     if not t:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Tenant not found')
@@ -170,7 +149,7 @@ def update_tenant(tenant_id: str, payload: TenantUpdate, actor: User = Depends(r
 
 
 @router.delete('/tenants/{tenant_id}')
-def delete_tenant(tenant_id: str, actor: User = Depends(require_permissions('manage_settings')), db: Session = Depends(get_db)):
+def delete_tenant(tenant_id: str, actor: User = Depends(require_super_admin), db: Session = Depends(get_db)):
     t = db.scalar(select(Tenant).where(Tenant.id == tenant_id))
     if not t:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Tenant not found')
@@ -297,13 +276,13 @@ def delete_tenant(tenant_id: str, actor: User = Depends(require_permissions('man
 
 # --- User tenancy management ---
 @router.get('/users', response_model=list[UserPublicSchema])
-def admin_list_users(actor: User = Depends(require_permissions('manage_settings')), db: Session = Depends(get_db)):
+def admin_list_users(actor: User = Depends(require_super_admin), db: Session = Depends(get_db)):
     rows = db.query(DbUser).all()
     return [to_public_user(u, db=db) for u in rows]
 
 
 @router.patch('/users/{user_id}/tenant', response_model=UserPublicSchema)
-def assign_user_to_tenant(user_id: str, tenant_id: str, actor: User = Depends(require_permissions('manage_settings')), db: Session = Depends(get_db)):
+def assign_user_to_tenant(user_id: str, tenant_id: str, actor: User = Depends(require_super_admin), db: Session = Depends(get_db)):
     target = db.scalar(select(DbUser).where(DbUser.id == user_id))
     if not target:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='User not found')
@@ -321,7 +300,7 @@ def assign_user_to_tenant(user_id: str, tenant_id: str, actor: User = Depends(re
 
 # Plans
 @router.post('/plans', response_model=PlanPublic)
-def create_plan(payload: PlanCreate, actor: User = Depends(require_permissions('manage_settings')), db: Session = Depends(get_db)):
+def create_plan(payload: PlanCreate, actor: User = Depends(require_super_admin), db: Session = Depends(get_db)):
     p = Plan(name=payload.name.strip(), price_cents=payload.price_cents, billing_period=payload.billing_period, description=payload.description)
     db.add(p)
     db.flush()
@@ -336,13 +315,13 @@ def create_plan(payload: PlanCreate, actor: User = Depends(require_permissions('
 
 
 @router.get('/plans', response_model=list[PlanPublic])
-def list_plans(actor: User = Depends(require_permissions('manage_settings')), db: Session = Depends(get_db)):
+def list_plans(actor: User = Depends(require_super_admin), db: Session = Depends(get_db)):
     rows = db.query(Plan).all()
     return [PlanPublic(id=r.id, name=r.name, price_cents=r.price_cents, billing_period=r.billing_period, description=r.description, is_active=r.is_active) for r in rows]
 
 
 @router.get('/packages', response_model=list[CustomPackagePublic])
-def list_custom_packages(actor: User = Depends(require_permissions('manage_settings')), db: Session = Depends(get_db)):
+def list_custom_packages(actor: User = Depends(require_super_admin), db: Session = Depends(get_db)):
     rows = db.query(FeaturePackage).all()
     return [CustomPackagePublic(
         id=r.id,
@@ -357,7 +336,7 @@ def list_custom_packages(actor: User = Depends(require_permissions('manage_setti
 @router.post('/packages', response_model=CustomPackagePublic)
 def create_custom_package(
     payload: CustomPackageCreate,
-    actor: User = Depends(require_permissions('manage_settings')),
+    actor: User = Depends(require_super_admin),
     db: Session = Depends(get_db),
 ) -> CustomPackagePublic:
     pkg = FeaturePackage(name=payload.name.strip(), description=payload.description or None, price_cents=payload.price_cents)
@@ -381,7 +360,7 @@ def create_custom_package(
 
 
 @router.get('/packages/{package_id}', response_model=CustomPackagePublic)
-def get_custom_package(package_id: str, actor: User = Depends(require_permissions('manage_settings')), db: Session = Depends(get_db)):
+def get_custom_package(package_id: str, actor: User = Depends(require_super_admin), db: Session = Depends(get_db)):
     pkg = db.scalar(select(FeaturePackage).where(FeaturePackage.id == package_id))
     if not pkg:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Package not found')
@@ -399,7 +378,7 @@ def get_custom_package(package_id: str, actor: User = Depends(require_permission
 def update_custom_package(
     package_id: str,
     payload: CustomPackageCreate,
-    actor: User = Depends(require_permissions('manage_settings')),
+    actor: User = Depends(require_super_admin),
     db: Session = Depends(get_db),
 ) -> CustomPackagePublic:
     pkg = db.scalar(select(FeaturePackage).where(FeaturePackage.id == package_id))
@@ -427,7 +406,7 @@ def update_custom_package(
 
 
 @router.delete('/packages/{package_id}')
-def delete_custom_package(package_id: str, actor: User = Depends(require_permissions('manage_settings')), db: Session = Depends(get_db)):
+def delete_custom_package(package_id: str, actor: User = Depends(require_super_admin), db: Session = Depends(get_db)):
     pkg = db.scalar(select(FeaturePackage).where(FeaturePackage.id == package_id))
     if not pkg:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Package not found')
@@ -437,7 +416,7 @@ def delete_custom_package(package_id: str, actor: User = Depends(require_permiss
 
 
 @router.get('/plans/{plan_id}/features', response_model=list[FeatureOption])
-def list_plan_features(plan_id: str, actor: User = Depends(require_permissions('manage_settings')), db: Session = Depends(get_db)):
+def list_plan_features(plan_id: str, actor: User = Depends(require_super_admin), db: Session = Depends(get_db)):
     plan = db.scalar(select(Plan).where(Plan.id == plan_id))
     if not plan:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Plan not found')
@@ -456,7 +435,7 @@ def list_plan_features(plan_id: str, actor: User = Depends(require_permissions('
 def update_plan_features(
     plan_id: str,
     payload: FeatureBundleCreate,
-    actor: User = Depends(require_permissions('manage_settings')),
+    actor: User = Depends(require_super_admin),
     db: Session = Depends(get_db),
 ) -> list[FeatureOption]:
     plan = db.scalar(select(Plan).where(Plan.id == plan_id))
@@ -473,7 +452,7 @@ def update_plan_features(
 
 
 @router.get('/plans/{plan_id}', response_model=PlanPublic)
-def get_plan(plan_id: str, actor: User = Depends(require_permissions('manage_settings')), db: Session = Depends(get_db)):
+def get_plan(plan_id: str, actor: User = Depends(require_super_admin), db: Session = Depends(get_db)):
     p = db.scalar(select(Plan).where(Plan.id == plan_id))
     if not p:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Plan not found')
@@ -481,7 +460,7 @@ def get_plan(plan_id: str, actor: User = Depends(require_permissions('manage_set
 
 
 @router.patch('/plans/{plan_id}', response_model=PlanPublic)
-def update_plan(plan_id: str, payload: PlanUpdate, actor: User = Depends(require_permissions('manage_settings')), db: Session = Depends(get_db)):
+def update_plan(plan_id: str, payload: PlanUpdate, actor: User = Depends(require_super_admin), db: Session = Depends(get_db)):
     p = db.scalar(select(Plan).where(Plan.id == plan_id))
     if not p:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Plan not found')
@@ -508,7 +487,7 @@ def update_plan(plan_id: str, payload: PlanUpdate, actor: User = Depends(require
 
 
 @router.delete('/plans/{plan_id}')
-def delete_plan(plan_id: str, actor: User = Depends(require_permissions('manage_settings')), db: Session = Depends(get_db)):
+def delete_plan(plan_id: str, actor: User = Depends(require_super_admin), db: Session = Depends(get_db)):
     p = db.scalar(select(Plan).where(Plan.id == plan_id))
     if not p:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Plan not found')
@@ -565,7 +544,7 @@ def _subscription_to_public(subscription: Subscription, db: Session) -> Subscrip
 def create_tenant_subscription(
     tenant_id: str,
     payload: SubscriptionCreate,
-    actor: User = Depends(require_permissions('manage_settings')),
+    actor: User = Depends(require_super_admin),
     db: Session = Depends(get_db),
 ) -> SubscriptionPublic:
     tenant = db.scalar(select(Tenant).where(Tenant.id == tenant_id))
@@ -640,7 +619,7 @@ def create_tenant_subscription(
 
 
 @router.get('/subscriptions', response_model=list[SubscriptionPublic])
-def list_subscriptions(actor: User = Depends(require_permissions('manage_settings')), db: Session = Depends(get_db)):
+def list_subscriptions(actor: User = Depends(require_super_admin), db: Session = Depends(get_db)):
     rows = db.query(Subscription).all()
     return [_subscription_to_public(row, db) for row in rows]
 
@@ -653,7 +632,7 @@ class VerifyPaymentRequest(BaseModel):
     razorpay_signature: str
 
 @router.post('/subscriptions/verify-payment')
-def verify_payment(payload: VerifyPaymentRequest, actor: User = Depends(require_permissions('manage_settings')), db: Session = Depends(get_db)):
+def verify_payment(payload: VerifyPaymentRequest, actor: User = Depends(require_super_admin), db: Session = Depends(get_db)):
     if not settings.razorpay_key_id or not settings.razorpay_key_secret:
         raise HTTPException(status_code=400, detail="Razorpay not configured")
     
@@ -693,7 +672,7 @@ def verify_payment(payload: VerifyPaymentRequest, actor: User = Depends(require_
 @router.get('/tenants/{tenant_id}/subscriptions', response_model=list[SubscriptionPublic])
 def list_tenant_subscriptions(
     tenant_id: str,
-    actor: User = Depends(require_permissions('manage_settings')),
+    actor: User = Depends(require_super_admin),
     db: Session = Depends(get_db),
 ) -> list[SubscriptionPublic]:
     tenant = db.scalar(select(Tenant).where(Tenant.id == tenant_id))
@@ -704,7 +683,7 @@ def list_tenant_subscriptions(
 
 
 @router.delete('/subscriptions/{subscription_id}')
-def cancel_subscription(subscription_id: str, actor: User = Depends(require_permissions('manage_settings')), db: Session = Depends(get_db)):
+def cancel_subscription(subscription_id: str, actor: User = Depends(require_super_admin), db: Session = Depends(get_db)):
     sub = db.scalar(select(Subscription).where(Subscription.id == subscription_id))
     if not sub:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Subscription not found')
@@ -720,7 +699,7 @@ def cancel_subscription(subscription_id: str, actor: User = Depends(require_perm
 
 # Tenant features
 @router.post('/tenants/{tenant_id}/features', response_model=TenantFeaturePublic)
-def add_tenant_feature(tenant_id: str, payload: TenantFeatureCreate, actor: User = Depends(require_permissions('manage_settings')), db: Session = Depends(get_db)):
+def add_tenant_feature(tenant_id: str, payload: TenantFeatureCreate, actor: User = Depends(require_super_admin), db: Session = Depends(get_db)):
     t = db.scalar(select(Tenant).where(Tenant.id == tenant_id))
     if not t:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Tenant not found')
@@ -732,13 +711,13 @@ def add_tenant_feature(tenant_id: str, payload: TenantFeatureCreate, actor: User
 
 
 @router.get('/tenants/{tenant_id}/features', response_model=list[TenantFeaturePublic])
-def list_tenant_features(tenant_id: str, actor: User = Depends(require_permissions('manage_settings')), db: Session = Depends(get_db)):
+def list_tenant_features(tenant_id: str, actor: User = Depends(require_super_admin), db: Session = Depends(get_db)):
     rows = db.query(TenantFeature).filter(TenantFeature.tenant_id == tenant_id).all()
     return [TenantFeaturePublic(id=r.id, tenant_id=r.tenant_id, feature_key=r.feature_key, enabled=r.enabled, created_at=r.created_at.isoformat()) for r in rows]
 
 
 @router.patch('/tenants/{tenant_id}/features/{feature_id}', response_model=TenantFeaturePublic)
-def update_tenant_feature(tenant_id: str, feature_id: str, payload: TenantFeatureCreate, actor: User = Depends(require_permissions('manage_settings')), db: Session = Depends(get_db)):
+def update_tenant_feature(tenant_id: str, feature_id: str, payload: TenantFeatureCreate, actor: User = Depends(require_super_admin), db: Session = Depends(get_db)):
     tf = db.scalar(select(TenantFeature).where(TenantFeature.id == feature_id, TenantFeature.tenant_id == tenant_id))
     if not tf:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Feature not found')
@@ -750,7 +729,7 @@ def update_tenant_feature(tenant_id: str, feature_id: str, payload: TenantFeatur
 
 
 @router.get('/features', response_model=list[FeatureOption])
-def list_feature_options(actor: User = Depends(require_permissions('manage_settings'))):
+def list_feature_options(actor: User = Depends(require_super_admin)):
     options = [
         FeatureOption(key='attendance_module', name='Attendance Module', description='Timesheets, regularization, and attendance reports', price_cents=29900),
         FeatureOption(key='payroll_module', name='Payroll Module', description='Payroll processing, salary slips, and financial reports', price_cents=49900),
@@ -765,7 +744,7 @@ def list_feature_options(actor: User = Depends(require_permissions('manage_setti
 def add_tenant_features_batch(
     tenant_id: str,
     payload: TenantFeatureBatchCreate,
-    actor: User = Depends(require_permissions('manage_settings')),
+    actor: User = Depends(require_super_admin),
     db: Session = Depends(get_db),
 ) -> list[TenantFeaturePublic]:
     t = db.scalar(select(Tenant).where(Tenant.id == tenant_id))
@@ -792,7 +771,7 @@ def add_tenant_features_batch(
 
 
 @router.delete('/tenants/{tenant_id}/features/{feature_id}')
-def delete_tenant_feature(tenant_id: str, feature_id: str, actor: User = Depends(require_permissions('manage_settings')), db: Session = Depends(get_db)):
+def delete_tenant_feature(tenant_id: str, feature_id: str, actor: User = Depends(require_super_admin), db: Session = Depends(get_db)):
     tf = db.scalar(select(TenantFeature).where(TenantFeature.id == feature_id, TenantFeature.tenant_id == tenant_id))
     if not tf:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Feature not found')

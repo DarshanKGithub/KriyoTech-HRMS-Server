@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
+from app.http import Router, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from typing import Optional
 
@@ -7,7 +7,7 @@ from app.db.database import get_db
 from app.services import todo_service
 from app.schemas.todo import TodoCreate, TodoUpdate, TodoPublic, PaginatedTodos
 
-router = APIRouter()
+router = Router()
 
 
 @router.get('/', response_model=PaginatedTodos)

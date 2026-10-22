@@ -6,7 +6,7 @@ from app.db.database import Base
 from app.db.models import Employee
 from app.services.employee_service import create_employee, update_employee
 from app.schemas.employee import EmployeeCreate, EmployeeUpdate
-from fastapi import HTTPException
+from app.http import HTTPException
 
 
 @pytest.fixture()
