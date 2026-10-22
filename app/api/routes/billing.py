@@ -50,7 +50,7 @@ def verified_webhook(request, db):
         return {'ok': True}
     entity = event.get('payload', {}).get('order' if kind == 'order.paid' else 'payment', {}).get('entity', {})
     order_id = entity.get('id') if kind == 'order.paid' else entity.get('order_id')
-    sub = db.scalar(select(Subscription).where(Subscription.external_order_id == order_id).with_for_update()) if order_id else None
+    sub = db.scalar(select(Subscription).where(Subscription.external_order_id == order_id).with_for_update(of=Subscription)) if order_id else None
     if not sub:
         raise HTTPException(404, 'Unknown payment order')
     if entity.get('currency') != 'INR' or entity.get('amount') != sub.price_paid_cents:

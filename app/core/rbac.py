@@ -282,37 +282,16 @@ def require_super_admin(user: User = Depends(get_current_user)) -> User:
 
 
 def require_entitlement(feature_key: str) -> Callable[[User], User]:
-    """Dependency to ensure the current user's tenant has the given feature enabled.
-
-    Resolves tenant by email domain for now. Raises 403 if the feature is not enabled.
-    """
-
+    """Require explicit company ownership, a current subscription and a module grant."""
     def _checker(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> User:
-        # Prefer explicit user.tenant_id binding; fallback to email domain
-        try:
-            t = None
-            if getattr(user, 'tenant_id', None):
-                t = db.scalar(select(Tenant).where(Tenant.id == user.tenant_id))
-            else:
-                parts = user.email.split('@')
-                if len(parts) != 2:
-                    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail='Tenant not found')
-                domain = parts[1].lower()
-                t = db.scalar(select(Tenant).where(Tenant.domain == domain))
-
-            if not t:
-                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail='Tenant not found')
-
-            # Check tenant-specific feature flags
-            tf = db.scalar(select(TenantFeature).where(TenantFeature.tenant_id == t.id, TenantFeature.feature_key == feature_key, TenantFeature.enabled == True))
-            if not tf:
-                # Feature disabled for this tenant
-                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail='Feature not enabled for tenant')
-        except HTTPException:
-            raise
-        except Exception:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail='Entitlement check failed')
-
+        from datetime import date
+        from app.db.models import Subscription
+        if not user.tenant_id:
+            raise HTTPException(403, 'An organization assignment is required')
+        tenant = db.get(Tenant, user.tenant_id)
+        active = db.scalar(select(Subscription.id).where(Subscription.tenant_id == user.tenant_id, Subscription.status == 'active', Subscription.starts_at <= date.today(), Subscription.ends_at.is_(None) | (Subscription.ends_at >= date.today())))
+        feature = db.scalar(select(TenantFeature.id).where(TenantFeature.tenant_id == user.tenant_id, TenantFeature.feature_key == feature_key, TenantFeature.enabled.is_(True)))
+        if not tenant or not tenant.is_active or not active or not feature:
+            raise HTTPException(403, 'An active subscription and enabled module are required')
         return user
-
     return _checker

@@ -272,7 +272,7 @@ def approve_payslip_endpoint(
     db: Session = Depends(get_db),
 ):
     """Approve a payslip (HR/Admin only)."""
-    if not has_permission(user.role, 'approve_leave') and not has_permission(user.role, 'approve_attendance'):
+    if not has_permission(user.role, 'process_payroll'):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail='Insufficient privileges')
     
     ps = approve_payslip(payslip_id, user.id, db, tenant_id=user.tenant_id)

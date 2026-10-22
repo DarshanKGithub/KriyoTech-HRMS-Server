@@ -595,8 +595,8 @@ def run_auto_checkout_job(db: Session):
         attendance.check_out_time=cutoff.astimezone(timezone.utc)
         for item in attendance.breaks:
             if item.end_time is None: item.end_time=attendance.check_out_time
-        duration=sum(((item.end_time-item.start_time).total_seconds()/3600) for item in attendance.breaks if item.start_time and item.end_time)
         rules=AttendanceRuleEngine(db,employee.tenant_id)
+        duration=sum(rules.calculate_working_hours(item.start_time,item.end_time) for item in attendance.breaks if item.start_time and item.end_time)
         hours=rules.calculate_working_hours(attendance.check_in_time,attendance.check_out_time,duration)
         attendance.is_half_day=rules.is_half_day(hours)
         attendance.notes=((attendance.notes+' | ') if attendance.notes else '')+'System: checked out at scheduled shift end.'

@@ -19,6 +19,11 @@ class OwnedSession(Session):
         result = super().get(entity, ident, **kwargs)
         actor = self.info.get('actor')
         if result is not None and actor and hasattr(result, 'tenant_id'):
+            from app.db.models import Notification, NotificationPreference
+            if isinstance(result, Notification) and result.recipient_id != actor.id:
+                return None
+            if isinstance(result, NotificationPreference) and result.user_id != actor.id:
+                return None
             if result.tenant_id != actor.tenant_id:
                 return None
             if actor.role not in {'HR', 'Admin', 'CEO'}:

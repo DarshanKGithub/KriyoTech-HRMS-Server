@@ -292,7 +292,18 @@ def assign_user_to_tenant(user_id: str, tenant_id: str, actor: User = Depends(re
     if not t:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Tenant not found')
 
+    if target.role == 'Super Admin':
+        raise HTTPException(403, 'Platform administrators cannot belong to a company')
+    if target.tenant_id and target.tenant_id != tenant_id:
+        raise HTTPException(409, 'An existing company assignment cannot be transferred here')
+    from app.db.models import Employee
+    from sqlalchemy import or_
+    employees = list(db.scalars(select(Employee).where(or_(Employee.id == target.id, Employee.email == target.email))))
+    if any(employee.tenant_id and employee.tenant_id != tenant_id for employee in employees):
+        raise HTTPException(409, 'The employee already belongs to another company')
     target.tenant_id = tenant_id
+    for employee in employees:
+        employee.tenant_id = tenant_id
     db.commit()
     db.refresh(target)
     return to_public_user(target, db=db)
@@ -511,6 +522,7 @@ def _get_subscription_feature_keys(plan: Plan) -> list[str]:
 
 def _sync_subscription_features(tenant_id: str, plan: Plan, db: Session) -> None:
     active_keys = set(_get_subscription_feature_keys(plan))
+    active_keys.update(db.scalars(select(PlanFeature.feature_key).where(PlanFeature.plan_id == plan.id, PlanFeature.is_included.is_(True))))
     existing = db.query(TenantFeature).filter(TenantFeature.tenant_id == tenant_id).all()
     seen: set[str] = set()
     for feature in existing:
@@ -605,6 +617,8 @@ def create_tenant_subscription(
             })
             razorpay_order_id = order['id']
             razorpay_key = settings.razorpay_key_id
+            subscription.external_order_id = razorpay_order_id
+            db.commit()
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
     else:
@@ -646,27 +660,31 @@ def verify_payment(payload: VerifyPaymentRequest, actor: User = Depends(require_
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
         
-    # If signature verification is successful, fetch the order notes
+    subscription = db.scalar(select(Subscription).where(Subscription.external_order_id == payload.razorpay_order_id).with_for_update(of=Subscription))
+    if not subscription:
+        raise HTTPException(404, 'Unknown payment order')
     try:
-        order = client.order.fetch(payload.razorpay_order_id)
-        metadata = order.get('notes', {})
-        subscription_id = metadata.get('subscription_id')
-        tenant_id = metadata.get('tenant_id')
-        plan_id = metadata.get('plan_id')
-        
-        if subscription_id and tenant_id and plan_id:
-            subscription = db.scalar(select(Subscription).where(Subscription.id == subscription_id))
-            if subscription and subscription.status == 'pending_payment':
-                subscription.status = 'active'
-                plan = db.scalar(select(Plan).where(Plan.id == plan_id))
-                if plan:
-                    _sync_subscription_features(tenant_id, plan, db)
-                db.commit()
-                return {"status": "success", "message": "Payment verified and subscription activated"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to process order metadata: {str(e)}")
-
-    return {"status": "success", "message": "Payment verified but subscription not activated (already active or missing metadata)"}
+        payment = client.payment.fetch(payload.razorpay_payment_id)
+    except Exception as exc:
+        raise HTTPException(502, 'Unable to verify the payment with the provider') from exc
+    if (payment.get('order_id') != subscription.external_order_id
+            or payment.get('status') != 'captured'
+            or payment.get('amount') != subscription.price_paid_cents
+            or payment.get('currency') != 'INR'):
+        raise HTTPException(400, 'A captured payment matching this order is required')
+    if subscription.status == 'active':
+        return {'status': 'success', 'message': 'Subscription is already active'}
+    if subscription.status != 'pending_payment':
+        raise HTTPException(409, 'Subscription is not awaiting payment')
+    plan = db.get(Plan, subscription.plan_id)
+    if not plan or not plan.is_active:
+        raise HTTPException(409, 'The purchased plan is unavailable')
+    subscription.status = 'active'
+    subscription.starts_at = date.today()
+    subscription.ends_at = subscription.starts_at + timedelta(days={'trial':14,'monthly':30,'3-month':90,'6-month':180,'9-month':270,'yearly':365}.get(plan.billing_period,30))
+    _sync_subscription_features(subscription.tenant_id, plan, db)
+    db.commit()
+    return {'status': 'success', 'message': 'Payment verified and subscription activated'}
 
 
 @router.get('/tenants/{tenant_id}/subscriptions', response_model=list[SubscriptionPublic])

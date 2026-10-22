@@ -17,10 +17,10 @@ def auto_checkout_wrapper():
             logger.exception(f"Failed to run auto checkout job: {e}")
 
 def start_scheduler():
-    # Schedule the auto-checkout job to run every day at 23:59 (11:59 PM) UTC
+    # Evaluate each company shift cutoff every minute
     scheduler.add_job(
         auto_checkout_wrapper,
-        trigger=CronTrigger(hour=23, minute=59),
+        trigger=CronTrigger(minute="*"),
         id='nightly_auto_checkout',
         name='Nightly Auto-Checkout',
         replace_existing=True

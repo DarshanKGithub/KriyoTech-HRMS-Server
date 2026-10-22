@@ -111,7 +111,7 @@ def to_public_user(user: User, db: Session | None = None) -> UserPublic:
     if db is not None and tenant_id:
         tenant = db.scalar(select(Tenant).where(Tenant.id==tenant_id))
         if tenant:
-            tenant_obj={'id':tenant.id,'name':tenant.name,'domain':tenant.domain}
+            tenant_obj={'id':tenant.id,'name':tenant.name,'domain':tenant.domain,'is_active':tenant.is_active,'timezone':tenant.timezone}
             active = db.scalar(select(Subscription.id).where(Subscription.tenant_id==tenant_id,Subscription.status=='active',Subscription.starts_at<=date.today(),(Subscription.ends_at.is_(None)|(Subscription.ends_at>=date.today()))))
             if active:
                 entitlements=list(db.scalars(select(TenantFeature.feature_key).where(TenantFeature.tenant_id==tenant_id,TenantFeature.enabled.is_(True))))

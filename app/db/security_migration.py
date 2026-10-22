@@ -42,6 +42,7 @@ def upgrade_security(conn):
                     parent = fk.column.table.name
                     if parent in owned:
                         conn.exec_driver_sql(f'UPDATE "{table.name}" SET tenant_id=(SELECT p.tenant_id FROM "{parent}" p WHERE p.id="{table.name}"."{name}") WHERE tenant_id IS NULL AND EXISTS (SELECT 1 FROM "{parent}" p WHERE p.id="{table.name}"."{name}" AND p.tenant_id IS NOT NULL)')
+    conn.exec_driver_sql('UPDATE audit_logs SET tenant_id=(SELECT u.tenant_id FROM users u WHERE u.id=audit_logs.actor_id) WHERE tenant_id IS NULL AND EXISTS (SELECT 1 FROM users u WHERE u.id=audit_logs.actor_id AND u.tenant_id IS NOT NULL)')
     if conn.dialect.name == 'postgresql':
         for table, columns in {'payslips':['days_worked','days_absent'], 'leave_requests':['days_requested'], 'leave_balances':['granted_days','balance_days'], 'leave_types':['default_days_per_year']}.items():
             for column in columns:

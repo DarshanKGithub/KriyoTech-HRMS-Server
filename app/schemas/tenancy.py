@@ -22,6 +22,7 @@ class TenantPublic(BaseModel):
     name: str
     domain: Optional[str] = None
     is_active: bool
+    timezone: str = 'Asia/Kolkata'
 
 
 class PlanCreate(BaseModel):

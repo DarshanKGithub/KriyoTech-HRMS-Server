@@ -50,6 +50,12 @@ def create_attendance_regularization(payload: AttendanceRegularizationCreate, db
             detail='A pending regularization already exists for this date',
         )
 
+    if payload.attendance_id:
+        linked = db.get(Attendance, payload.attendance_id)
+        if not linked or linked.employee_id != payload.employee_id or linked.attendance_date != payload.date:
+            raise HTTPException(400, 'Attendance must match the employee and date')
+    if payload.requested_check_in and payload.requested_check_out and payload.requested_check_out <= payload.requested_check_in:
+        raise HTTPException(400, 'Checkout must follow check-in')
     payload_data = payload.model_dump()
     if payload_data.get('attendance_id') is None:
         attendance = (
@@ -89,14 +95,17 @@ def get_regularizations(
 
 
 def approve_regularization(reg_id: str, approver_id: str, db: Session) -> AttendanceRegularization:
-    reg = db.query(AttendanceRegularization).filter(AttendanceRegularization.id == reg_id).first()
+    reg = db.query(AttendanceRegularization).filter(AttendanceRegularization.id == reg_id).with_for_update().populate_existing().first()
     if not reg:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Regularization not found")
     
     if reg.status != 'Pending':
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Only pending requests can be approved")
     
-    reg.status = 'Approved'
+    actor = db.info.get('actor')
+    if actor and reg.employee_id == actor.employee_id:
+        raise HTTPException(403, 'You cannot approve your own correction')
+    reg.status = 'Approved' 
     reg.approver_id = approver_id
     
     # Update the actual attendance record
@@ -121,24 +130,41 @@ def approve_regularization(reg_id: str, approver_id: str, db: Session) -> Attend
     if attendance is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Attendance record not found")
 
+    if attendance.employee_id != reg.employee_id or attendance.attendance_date != reg.date:
+        raise HTTPException(400, 'Attendance must match the employee and date')
+    start = reg.requested_check_in or attendance.check_in_time
+    end = reg.requested_check_out or attendance.check_out_time
+    if start and end:
+        from datetime import timezone
+        start = start.replace(tzinfo=timezone.utc) if start.tzinfo is None else start
+        end = end.replace(tzinfo=timezone.utc) if end.tzinfo is None else end
+        if end <= start:
+            raise HTTPException(400, 'Checkout must follow check-in')
     if reg.requested_check_in:
         attendance.check_in_time = reg.requested_check_in
     if reg.requested_check_out:
         attendance.check_out_time = reg.requested_check_out
-    if reg.requested_check_in or reg.requested_check_out:
+    from app.services.attendance_service import AttendanceRuleEngine
+    from app.services.shift_service import get_employee_current_shift
+    from app.core.business_time import local_time
+    rules = AttendanceRuleEngine(db, reg.tenant_id)
+    shift = get_employee_current_shift(reg.employee_id, reg.date, db)
+    if attendance.check_in_time:
+        minutes = rules.calculate_late_minutes(local_time(attendance.check_in_time, db, reg.tenant_id), shift)
+        attendance.late_minutes = minutes
+        attendance.is_late = rules.is_late_entry(minutes)
         attendance.status = 'present'
-        attendance.is_half_day = False
-        attendance.is_work_from_home = False
-        attendance.is_late = False
-        attendance.late_minutes = 0
-        
+    if attendance.check_in_time and attendance.check_out_time:
+        breaks = sum(rules.calculate_working_hours(item.start_time, item.end_time) for item in attendance.breaks if item.end_time)
+        hours = rules.calculate_working_hours(attendance.check_in_time, attendance.check_out_time, breaks)
+        attendance.is_half_day = rules.is_half_day(hours)
     db.commit()
     db.refresh(reg)
     return reg
 
 
 def reject_regularization(reg_id: str, approver_id: str, db: Session) -> AttendanceRegularization:
-    reg = db.query(AttendanceRegularization).filter(AttendanceRegularization.id == reg_id).first()
+    reg = db.query(AttendanceRegularization).filter(AttendanceRegularization.id == reg_id).with_for_update().populate_existing().first()
     if not reg:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Regularization not found")
     

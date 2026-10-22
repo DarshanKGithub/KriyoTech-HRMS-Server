@@ -164,12 +164,14 @@ def create_payslip(employee_id: str, month: int, year: int, days_worked=None, da
     return payslip
 
 
-def get_payslip(payslip_id: str, db: Session, tenant_id: str | None = None) -> Payslip:
+def get_payslip(payslip_id: str, db: Session, tenant_id: str | None = None, lock: bool = False) -> Payslip:
     """Fetch a payslip by ID."""
     query = db.query(Payslip)
     if tenant_id:
         query = query.join(Employee, Payslip.employee_id == Employee.id).filter(Employee.tenant_id == tenant_id)
-    ps = query.filter(Payslip.id == payslip_id).first()
+    if lock:
+        query = query.with_for_update(of=Payslip)
+    ps = query.filter(Payslip.id == payslip_id).populate_existing().first()
     if not ps:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Payslip not found')
     return ps
@@ -198,7 +200,7 @@ def list_payslips(db: Session, tenant_id: str | None = None, employee_id: str | 
 
 def approve_payslip(payslip_id: str, approver_id: str, db: Session, tenant_id: str | None = None) -> Payslip:
     """Approve a payslip (transition from draft to approved)."""
-    ps = get_payslip(payslip_id, db, tenant_id)
+    ps = get_payslip(payslip_id, db, tenant_id, lock=True)
     
     if ps.status != 'draft':
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Payslip is not in draft status')
@@ -230,7 +232,7 @@ def approve_payslip(payslip_id: str, approver_id: str, db: Session, tenant_id: s
 
 def mark_payslip_paid(payslip_id: str, processor_id: str, db: Session, tenant_id: str | None = None) -> Payslip:
     """Mark payslip as paid (transition from approved to paid)."""
-    ps = get_payslip(payslip_id, db, tenant_id)
+    ps = get_payslip(payslip_id, db, tenant_id, lock=True)
     
     if ps.status != 'approved':
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Payslip must be approved before marking as paid')

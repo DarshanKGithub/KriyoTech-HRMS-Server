@@ -1,7 +1,7 @@
 """Real API contracts using a foreign-key-enforced database and no HTTP mocks."""
 from datetime import date, datetime, timedelta, timezone
 from calendar import monthrange
-import hashlib, hmac, json
+import hashlib, hmac, json, os
 import pytest
 from sqlalchemy import create_engine, event, select
 from app.db.database import OwnedSession as Session
@@ -15,9 +15,11 @@ from app.core.config import settings
 
 @pytest.fixture
 def api():
-    engine=create_engine('sqlite://',connect_args={'check_same_thread':False},poolclass=StaticPool)
-    @event.listens_for(engine,'connect')
-    def fk(connection,_): connection.execute('PRAGMA foreign_keys=ON')
+    target=os.environ.get('HRMS_TEST_DATABASE_URL','sqlite://')
+    engine=create_engine(target,**({'connect_args':{'check_same_thread':False},'poolclass':StaticPool} if target.startswith('sqlite') else {}))
+    if target.startswith('sqlite'):
+        @event.listens_for(engine,'connect')
+        def fk(connection,_): connection.execute('PRAGMA foreign_keys=ON')
     Base.metadata.create_all(engine)
     with Session(engine,expire_on_commit=False,autoflush=False) as db:
         db.add_all([Tenant(id='a',name='Company A'),Tenant(id='b',name='Company B')]); db.flush()
@@ -35,6 +37,8 @@ def api():
         db.get(Employee,'a-employee').manager_id='a-manager'; db.commit()
         def database(): yield db
         with override_dependencies({get_db:database}): yield APIClient(),db
+    if not target.startswith('sqlite'):
+        Base.metadata.drop_all(engine)
     engine.dispose()
 
 def auth(key): return {'Authorization':'Bearer '+create_access_token({'sub':f'{key}@example.test'})}
@@ -160,3 +164,43 @@ def test_half_day_leave_overlap_rejection_and_pending_dashboard(api):
     assert any(item['id']==request.json()['id'] for item in dashboard.json()['pending_leaves'])
     assert client.post('/leave/requests/'+request.json()['id']+'/approve',headers=auth('a-manager'),json={'approve':False}).json()['status']=='rejected'
     assert client.get('/leave/balances',headers=auth('a-employee')).json()==[]
+
+
+def test_verified_payment_replay_and_amount_mismatch(api,monkeypatch):
+    client,db=api
+    db.info.pop('actor',None)
+    db.add(Subscription(id='pending',tenant_id='a',plan_id='plan',starts_at=date.today(),status='pending_payment',price_paid_cents=1000,external_order_id='order_test'))
+    db.commit()
+    monkeypatch.setattr(settings,'razorpay_webhook_secret','local-test-secret')
+    def send(amount):
+        payload={'event':'payment.captured','payload':{'payment':{'entity':{'order_id':'order_test','amount':amount,'currency':'INR','status':'captured'}}}}
+        raw=json.dumps(payload).encode()
+        signature=hmac.new(b'local-test-secret',raw,hashlib.sha256).hexdigest()
+        return client.post('/billing/webhook',data=raw,content_type='application/json',headers={'X-Razorpay-Signature':signature,'Content-Type':'application/json'})
+    assert send(1).status_code==400
+    assert send(1000).status_code==200
+    end=db.get(Subscription,'pending').ends_at
+    assert send(1000).status_code==200
+    assert db.get(Subscription,'pending').ends_at==end
+    assert client.patch('/admin/users/a-employee/tenant?tenant_id=b',headers=auth('platform')).status_code==409
+
+
+def test_correction_preserves_half_days_and_blocks_foreign_links(api):
+    client,db=api
+    db.info.pop('actor',None)
+    from app.db.models import AttendanceRule
+    db.add(AttendanceRule(tenant_id='a',name='Half day',rule_type='half_day',threshold_minutes=240,is_active=True))
+    db.add(Attendance(id='other-attendance',tenant_id='a',employee_id='a-unrelated',attendance_date=date(2026,9,3),status='present'))
+    db.commit()
+    body={'employee_id':'a-employee','date':'2026-09-03','reason':'Missing punch','requested_check_in':'2026-09-03T03:30:00Z','requested_check_out':'2026-09-03T05:30:00Z'}
+    foreign=client.post('/advanced-attendance/regularizations',headers=auth('a-employee'),json={**body,'attendance_id':'other-attendance'})
+    assert foreign.status_code==400,foreign.content
+    created=client.post('/advanced-attendance/regularizations',headers=auth('a-employee'),json=body)
+    assert created.status_code==200,created.content
+    identifier=created.json()['id']
+    assert client.post(f'/advanced-attendance/regularizations/{identifier}/approve',headers=auth('b-hr')).status_code==404
+    approved=client.post(f'/advanced-attendance/regularizations/{identifier}/approve',headers=auth('a-hr'))
+    assert approved.status_code==200,approved.content
+    rows=client.get('/attendance/?employee_id=a-employee&start_date=2026-09-03&end_date=2026-09-03',headers=auth('a-hr'))
+    assert rows.status_code==200,rows.content
+    assert rows.json()['items'][0]['is_half_day'] is True
