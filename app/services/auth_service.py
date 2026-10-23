@@ -135,11 +135,10 @@ def authenticate_user(*, email: str, password: str, db: Session, role: str | Non
     if not user or not user.is_active:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail='Invalid email or password')
 
-    if role and user.role.lower() != role.lower():
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail='Selected role does not match this account')
-
     if not verify_password(password, user.password_hash):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail='Invalid email or password')
+    if role and user.role.lower() != role.lower():
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail='Selected role does not match this account')
 
     return user
 
@@ -147,7 +146,14 @@ def authenticate_user(*, email: str, password: str, db: Session, role: str | Non
 def create_login_response(user: User, db: Session | None = None) -> LoginResponse:
     from app.core.ownership import bind_actor
     bind_actor(db, user)
-    access_token, expires_at = create_access_token(subject=user.email, user_id=user.id, role=user.role)
+    from datetime import timedelta
+    from app.core.config import settings
+    from app.db.models import AuthSession
+    expires_at = datetime.now(timezone.utc)+timedelta(minutes=settings.access_token_expire_minutes)
+    session = AuthSession(user_id=user.id,tenant_id=user.tenant_id,expires_at=expires_at)
+    db.add(session);db.flush()
+    access_token = create_access_token({'sub':user.email,'uid':user.id,'role':user.role,'ver':user.auth_version or 0,'sid':session.id,'exp':expires_at})
+    db.commit()
     expires_in = int((expires_at - datetime.now(timezone.utc)).total_seconds())
     return LoginResponse(access_token=access_token, expires_in=max(expires_in, 1), user=to_public_user(user, db=db))
 
@@ -163,6 +169,14 @@ def get_user_from_token(token: str, db: Session) -> User:
     if not user or not user.is_active:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail='User not found')
 
+    if payload.get('ver',0) != (user.auth_version or 0):
+        raise HTTPException(401,'Your session has been revoked. Please sign in again.')
+    if payload.get('sid'):
+        from app.db.models import AuthSession
+        from app.services.account_service import utc
+        session=db.scalar(select(AuthSession).where(AuthSession.id==payload['sid'],AuthSession.user_id==user.id))
+        if not session or session.revoked_at or utc(session.expires_at)<=datetime.now(timezone.utc):
+            raise HTTPException(401,'Your session has been revoked. Please sign in again.')
     from app.core.ownership import bind_actor
     bind_actor(db, user)
     return user
@@ -194,6 +208,8 @@ def change_password(user: User, old_password: str, new_password: str, *, db: Ses
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='New password must be different from old password')
 
     user.password_hash = hash_password(new_password)
+    from app.services.account_service import revoke_all
+    revoke_all(user,db)
     db.commit()
 
 def register_tenant(payload, db: Session) -> User:

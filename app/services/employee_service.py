@@ -286,6 +286,9 @@ def update_employee(employee_id: str, payload: EmployeeUpdate, db: Session, acto
 
         emp.manager_id = payload.manager_id
     if payload.is_active is not None:
+        if linked_user and linked_user.is_active != payload.is_active:
+            from app.services.account_service import revoke_all
+            revoke_all(linked_user,db)
         emp.is_active = payload.is_active
         if linked_user:
             linked_user.is_active = payload.is_active

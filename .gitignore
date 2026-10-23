@@ -6,3 +6,7 @@
 .django-deps/
 __pycache__/
 .pytest_cache/
+
+.django-deps-release/
+
+.artifacts/

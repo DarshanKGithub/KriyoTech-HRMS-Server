@@ -1,3 +1,4 @@
+from app.core.rbac import require_permissions
 from datetime import date, datetime
 
 from app.http import Router, Depends, HTTPException, status, Query
@@ -142,3 +143,24 @@ def get_feed(
         page=page,
         page_size=page_size,
     )
+
+
+@router.get('/reports/core')
+def core_report(user: User = Depends(require_permissions('manage_org')), db: Session = Depends(get_db)):
+    from sqlalchemy import select,func
+    from app.db.models import Employee,JobPosting,Candidate,OnboardingPlan,ExitCase,AssetInventory,HelpdeskTicket,Goal,EmployeeDocument,TaxDeclaration
+    if not user.tenant_id or user.role=='Super Admin':
+        raise HTTPException(403,'Use an organization account for HR reports')
+    models={'employees':Employee,'jobs':JobPosting,'candidates':Candidate,'onboarding_plans':OnboardingPlan,'exit_cases':ExitCase,'assets':AssetInventory,'support_tickets':HelpdeskTicket,'goals':Goal,'documents':EmployeeDocument,'tax_declarations':TaxDeclaration}
+    return {'counts':{key:int(db.scalar(select(func.count(model.id))) or 0) for key,model in models.items()}}
+
+@router.get('/reports/core.csv')
+def export_core_report(user: User = Depends(require_permissions('manage_org')), db: Session = Depends(get_db)):
+    from django.http import HttpResponse
+    import csv,io
+    data=core_report(user,db)
+    output=io.StringIO();writer=csv.writer(output);writer.writerow(['Metric','Count'])
+    writer.writerows(data['counts'].items())
+    response=HttpResponse(output.getvalue(),content_type='text/csv')
+    response['Content-Disposition']='attachment; filename="core-hr-report.csv"'
+    return response

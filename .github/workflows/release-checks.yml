@@ -1,0 +1,40 @@
+name: Backend release checks
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: hrms_ci
+        ports: ['5432:5432']
+        options: --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/hrms_ci
+      SECRET_KEY: isolated-ci-only-key-not-for-production-2026
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: |
+            requirements.lock.txt
+            requirements-dev.txt
+      - run: python -m pip install -r requirements.lock.txt -r requirements-dev.txt
+      - run: python -m pytest -q --junitxml=.artifacts/backend-tests.xml
+      - run: python manage.py upgrade_hrms_release
+      - run: python manage.py upgrade_hrms_release
+      - run: python tools/validate_postgres_journey.py
+      - run: python -m pip_audit -r requirements.lock.txt --format json --output .artifacts/python-audit.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: backend-release-results
+          path: .artifacts/

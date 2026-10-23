@@ -1,3 +1,4 @@
+from app.services.auth_service import resolve_employee_id
 from app.http import Router, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 from typing import Optional
@@ -50,7 +51,7 @@ def submit_gatepass(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    if payload.employee_id != user.id and not has_permission(user.role, 'manage_gatepasses'):
+    if payload.employee_id != resolve_employee_id(user,db) and not has_permission(user.role, 'manage_gatepasses'):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail='Cannot create gate pass for others')
 
     gp = create_gatepass(payload, db)
@@ -66,11 +67,11 @@ def list_gatepass_endpoint(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    if employee_id and employee_id != user.id and not has_permission(user.role, 'manage_gatepasses'):
+    if employee_id and employee_id != resolve_employee_id(user,db) and not has_permission(user.role, 'manage_gatepasses'):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail='Cannot view other employee gate passes')
 
     if not employee_id and not has_permission(user.role, 'manage_gatepasses'):
-        employee_id = user.id
+        employee_id = resolve_employee_id(user,db)
 
     items, total = list_gatepasses(db, employee_id=employee_id, status=status, page=page, size=size)
     return PaginatedGatePasses(items=[GatePassPublic.model_validate(i, from_attributes=True) for i in items], total=total, page=page, size=size)
@@ -95,7 +96,7 @@ def submit_ticket(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    if payload.employee_id != user.id and not has_permission(user.role, 'manage_helpdesk'):
+    if payload.employee_id != resolve_employee_id(user,db) and not has_permission(user.role, 'manage_helpdesk'):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cannot create tickets for others")
     
     return HelpdeskTicketPublic.model_validate(create_ticket(payload, db))
@@ -109,11 +110,11 @@ def list_tickets(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    if employee_id and employee_id != user.id and not has_permission(user.role, 'manage_helpdesk'):
+    if employee_id and employee_id != resolve_employee_id(user,db) and not has_permission(user.role, 'manage_helpdesk'):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cannot view other's tickets")
 
     if not employee_id and not has_permission(user.role, 'manage_helpdesk'):
-        employee_id = user.id
+        employee_id = resolve_employee_id(user,db)
 
     items, total = get_tickets(db, employee_id, category, page, size)
     return PaginatedHelpdeskTickets(
@@ -182,7 +183,7 @@ def file_grievance(
     db: Session = Depends(get_db)
 ):
     """File a new employee grievance"""
-    grievance = create_grievance(payload, user.id, db)
+    grievance = create_grievance(payload, resolve_employee_id(user,db), db)
     return EmployeeGrievancePublic.model_validate(grievance, from_attributes=True)
 
 
@@ -203,7 +204,7 @@ def list_grievances(
         # Employees can only see their own grievances
         items, total = get_grievances(
             db,
-            employee_id=user.id,
+            employee_id=resolve_employee_id(user,db),
             status_filter=status,
             page=page,
             size=size
@@ -229,7 +230,7 @@ def get_grievance_detail(
         raise HTTPException(status_code=404, detail='Grievance not found')
     
     # Check permission
-    if grievance.employee_id != user.id and not has_permission(user.role, 'manage_grievances'):
+    if grievance.employee_id != resolve_employee_id(user,db) and not has_permission(user.role, 'manage_grievances'):
         raise HTTPException(status_code=403, detail='Cannot access this grievance')
     
     return EmployeeGrievancePublic.model_validate(grievance, from_attributes=True)

@@ -142,6 +142,10 @@ def update_tenant(tenant_id: str, payload: TenantUpdate, actor: User = Depends(r
     if payload.domain is not None:
         t.domain = payload.domain
     if payload.is_active is not None:
+        if t.is_active and not payload.is_active:
+            from app.services.account_service import revoke_all
+            for member in db.scalars(select(DbUser).where(DbUser.tenant_id==t.id)):
+                revoke_all(member,db)
         t.is_active = payload.is_active
     db.commit()
     db.refresh(t)

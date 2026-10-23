@@ -96,7 +96,7 @@ def test_onboarding_exit_and_asset_flows(db_session):
         db_session,
         AssetCreate(asset_tag='LAP-001', name='Developer Laptop', category='IT Equipment', employee_id=employee.id),
     )
-    assert asset.status == 'Available'
+    assert asset.status == 'Assigned'
     updated_asset = update_asset(db_session, asset.id, AssetUpdate(status='Assigned', employee_id=employee.id))
     assert updated_asset.status == 'Assigned'
     assert updated_asset.employee_id == employee.id

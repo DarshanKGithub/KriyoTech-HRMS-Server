@@ -56,6 +56,39 @@ except Exception:
 router = Router()
 
 
+@router.get('/rules')
+def attendance_rules(db: Session = Depends(get_db), user: User = Depends(require_permissions('manage_shifts'))):
+    from sqlalchemy import select
+    from app.db.models import AttendanceRule
+    return [dict(id=row.id, name=row.name, rule_type=row.rule_type,
+                 threshold_minutes=row.threshold_minutes, is_active=row.is_active)
+            for row in db.scalars(select(AttendanceRule).where(AttendanceRule.tenant_id == user.tenant_id))]
+
+
+from app.schemas.attendance import AttendanceRuleCreate
+
+
+@router.post('/rules')
+def save_attendance_rule(payload: AttendanceRuleCreate, db: Session = Depends(get_db), user: User = Depends(require_permissions('manage_shifts'))):
+    from sqlalchemy import select
+    from app.db.models import AttendanceRule, AuditLog
+    if payload.rule_type not in {'late_entry', 'early_exit', 'half_day'}:
+        raise HTTPException(400, 'Unsupported attendance rule type')
+    if not payload.name.strip() or len(payload.name) > 120 or not 0 <= payload.threshold_minutes <= 1440:
+        raise HTTPException(400, 'Provide a name and a threshold between 0 and 1440 minutes')
+    row = db.scalar(select(AttendanceRule).where(AttendanceRule.tenant_id == user.tenant_id, AttendanceRule.rule_type == payload.rule_type).with_for_update(of=AttendanceRule))
+    if row is None:
+        row = AttendanceRule(tenant_id=user.tenant_id, **payload.model_dump())
+        db.add(row)
+    else:
+        for key, value in payload.model_dump().items():
+            setattr(row, key, value)
+    db.flush()
+    db.add(AuditLog(actor_id=user.id, action='update', object_type='attendance_rule', object_id=row.id, data=payload.model_dump_json()))
+    db.commit()
+    return dict(id=row.id, name=row.name, rule_type=row.rule_type, threshold_minutes=row.threshold_minutes, is_active=row.is_active)
+
+
 def _attendance_to_dict(a) -> dict:
     return {
         'id': a.id,

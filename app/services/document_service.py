@@ -8,7 +8,8 @@ from app.db.models import Employee, EmployeeDocument, User
 from app.http import HTTPException
 from app.services.auth_service import resolve_employee_id
 
-UPLOAD_ROOT = Path(__file__).resolve().parents[2] / 'uploads'
+from app.core.config import settings
+UPLOAD_ROOT = Path(settings.upload_root).resolve()
 MAX_DOCUMENT_BYTES = 10 * 1024 * 1024
 ALLOWED_EXTENSIONS = {'.pdf', '.png', '.jpg', '.jpeg', '.webp', '.doc', '.docx', '.txt'}
 

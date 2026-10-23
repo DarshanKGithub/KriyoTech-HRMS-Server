@@ -175,6 +175,7 @@ ROLE_PERMISSIONS: dict[str, set[str]] = {
         'upload_documents',
     },
     'Manager': {
+        'view_payslip_own', 'download_payslip', 'submit_reimbursement', 'raise_support_ticket',
         *_module_permissions('common', 'attendance', 'leave', 'performance', 'documents', 'engagement', 'reports'),
         'view_employee',
         'view_performance_team',

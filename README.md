@@ -15,10 +15,11 @@ Use Python 3.12 or newer.
 python -m venv .venv-local
 # Windows: .venv-local\Scripts\activate
 # Linux/macOS: source .venv-local/bin/activate
-python -m pip install -r requirements-dev.txt
+python -m pip install -r requirements.lock.txt -r requirements-dev.txt
 ```
 
-Copy `.env.example` to `.env` and configure database, secrets and allowed hosts.
+Copy `.env.example` to ignored `.env.local` and configure database, secrets and allowed hosts.
+Local settings override `.env`; process environment variables take precedence over both files.
 The default database is SQLite (`sqlite:///./hrms.db`). PostgreSQL is supported
 through `DATABASE_URL=postgresql+psycopg://user:password@localhost:5432/hrms`.
 
@@ -31,6 +32,12 @@ python manage.py init_hrms
 For an **existing database**, retain it and apply reviewed Alembic migrations
 as described in [README_MIGRATIONS.md](README_MIGRATIONS.md). Web startup does
 not modify the schema or seed accounts.
+
+For the account recovery/workflow release, back up the database and run
+`python manage.py upgrade_hrms_release`. This repeatable command records revision
+`20261022_account_release`. Run `python manage.py run_mail_worker` separately to
+deliver queued invitations, password resets and email notifications. Configure
+SMTP and PUBLIC_APP_URL in `.env.local`; normal web startup does not run workers.
 
 Start the API:
 

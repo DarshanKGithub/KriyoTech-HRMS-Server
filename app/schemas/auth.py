@@ -15,6 +15,7 @@ class TenantPublic(BaseModel):
     id: str
     name: str
     domain: str | None = None
+    timezone: str = 'Asia/Kolkata'
 
 
 class UserPublic(BaseModel):
@@ -45,7 +46,7 @@ class RoleUpdateRequest(BaseModel):
 
 
 class ChangePasswordRequest(BaseModel):
-    old_password: str = Field(min_length=8)
+    old_password: str = Field(min_length=1)
     new_password: str = Field(min_length=8)
 
 
@@ -65,11 +66,6 @@ class PermissionsResponse(BaseModel):
     role: str
     permissions: list[str]
 
-
-class TenantPublic(BaseModel):
-    id: str
-    name: str
-    domain: str | None = None
 
 class RegisterRequest(BaseModel):
     company_name: str = Field(min_length=1)

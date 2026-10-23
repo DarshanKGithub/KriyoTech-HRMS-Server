@@ -25,6 +25,7 @@ class OfferUpdate(BaseModel):
 
 
 class OfferPublic(OfferCreate):
+    employee_name: str | None = None
     id: str
     created_at: datetime
     updated_at: datetime
@@ -46,6 +47,7 @@ class OnboardingUpdate(BaseModel):
 
 
 class OnboardingPublic(OnboardingCreate):
+    employee_name: str | None = None
     id: str
     created_at: datetime
     updated_at: datetime
@@ -71,6 +73,7 @@ class ExitUpdate(BaseModel):
 
 
 class ExitPublic(ExitCreate):
+    employee_name: str | None = None
     id: str
     created_at: datetime
     updated_at: datetime
@@ -97,6 +100,7 @@ class AssetUpdate(BaseModel):
 
 
 class AssetPublic(AssetCreate):
+    employee_name: str | None = None
     id: str
     assigned_on: Optional[datetime] = None
     created_at: datetime

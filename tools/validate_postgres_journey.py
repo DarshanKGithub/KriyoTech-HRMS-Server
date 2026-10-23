@@ -15,7 +15,7 @@ with engine.begin() as conn:
 try:
     test_url = url.update_query_dict({'options': f'-csearch_path={schema}'})
     env = dict(os.environ, HRMS_TEST_DATABASE_URL=test_url.render_as_string(hide_password=False))
-    result = subprocess.run([sys.executable, '-B', '-m', 'pytest', 'tests/test_core_hr_journey.py', '-q', '--tb=short', '-p', 'no:warnings', '--basetemp=.pytest_cache/postgres-core'], env=env)
+    result = subprocess.run([sys.executable, '-B', '-m', 'pytest', 'tests/test_core_hr_journey.py', 'tests/test_release_journey.py', '-q', '--tb=short', '-p', 'no:warnings', '--basetemp=.pytest_cache/postgres-core'], env=env)
     raise SystemExit(result.returncode)
 finally:
     with engine.begin() as conn:

@@ -121,7 +121,7 @@ def test_notification_send_preferences_read_and_stats(db, recipient_user):
         data=json.dumps({'employee_name': 'Notification User'}),
     )
     notification = NotificationService.send_notification(db, in_app_payload)
-    assert notification.status == 'Pending'
+    assert notification.status == 'Sent'
 
     unread_count = NotificationService.get_unread_count(db, recipient_user.id)
     assert unread_count == 2
@@ -164,6 +164,6 @@ def test_bulk_notifications_create_multiple_rows(db, recipient_user):
     )
 
     assert len(notifications) == 2
-    assert all(item.status == 'Pending' for item in notifications)
+    assert all(item.status == 'Sent' for item in notifications)
     assert NotificationService.get_unread_count(db, recipient_user.id) == 1
     assert NotificationService.get_unread_count(db, second_user.id) == 1

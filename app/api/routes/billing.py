@@ -62,7 +62,7 @@ def verified_webhook(request, db):
     plan = db.get(Plan, sub.plan_id)
     sub.status = 'active'
     sub.starts_at = date.today()
-    sub.ends_at = sub.starts_at + timedelta(days=365 if plan.billing_period == 'yearly' else 30)
+    sub.ends_at = sub.starts_at + timedelta(days={'trial':14,'monthly':30,'3-month':90,'6-month':180,'9-month':270,'yearly':365}.get(plan.billing_period,30))
     from app.api.routes.admin import _sync_subscription_features
     _sync_subscription_features(sub.tenant_id, plan, db)
     db.commit()

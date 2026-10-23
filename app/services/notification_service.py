@@ -112,20 +112,21 @@ class NotificationService:
     @staticmethod
     def should_send(db: Session, user_id: str, channel: str) -> bool:
         """Check if notification should be sent based on user preferences"""
-        pref = db.query(NotificationPreference).filter(
-            NotificationPreference.user_id == user_id
-        ).first()
-        
+        from sqlalchemy import select
+        recipient=db.get(User,user_id)
+        if not recipient: return False
+        pref=db.execute(select(NotificationPreference.__table__).where(NotificationPreference.__table__.c.user_id==user_id,NotificationPreference.__table__.c.tenant_id==recipient.tenant_id)).mappings().first()
+
         if not pref:
             # Default preferences: all channels enabled
             return True
         
         # Check channel preference
         channel_map = {
-            'email': pref.email_enabled,
-            'sms': pref.sms_enabled,
-            'in_app': pref.in_app_enabled,
-            'push': pref.push_enabled
+            'email': pref['email_enabled'],
+            'sms': pref['sms_enabled'],
+            'in_app': pref['in_app_enabled'],
+            'push': pref['push_enabled']
         }
         
         if channel not in channel_map:
@@ -136,15 +137,20 @@ class NotificationService:
     @staticmethod
     def send_notification(db: Session, payload: NotificationCreate) -> Notification:
         """Create and send a notification"""
+        from app.http import HTTPException
+        recipient = db.get(User, payload.recipient_id)
+        if not recipient:
+            raise HTTPException(404, 'Recipient not found')
         
         # Check user preferences
         if not NotificationService.should_send(db, payload.recipient_id, payload.channel):
             status = 'Skipped'
         else:
-            status = 'Pending'
+            status = 'Sent' if payload.channel=='in_app' else 'Pending'
         
         notification = Notification(
             id=str(uuid4()),
+            tenant_id=recipient.tenant_id,
             recipient_id=payload.recipient_id,
             template_id=payload.template_id,
             event_type=payload.event_type,
@@ -156,6 +162,17 @@ class NotificationService:
         )
         
         db.add(notification)
+        if status!='Skipped' and payload.channel=='email':
+            from app.services.mail_service import queue_mail
+            from app.http import HTTPException
+            recipient=db.get(User,payload.recipient_id)
+            if not recipient: raise HTTPException(404,'Recipient not found')
+            db.flush()
+            queue_mail(db,recipient.email,payload.subject or 'KriyoHR notification',payload.message,recipient.tenant_id,notification.id)
+        elif status!='Skipped' and payload.channel not in {'in_app','email'}:
+            from app.http import HTTPException
+            raise HTTPException(503,'This notification delivery channel is not configured')
+        if status=='Sent': notification.sent_at=datetime.now(timezone.utc)
         db.commit()
         return notification
     

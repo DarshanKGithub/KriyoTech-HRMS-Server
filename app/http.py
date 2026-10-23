@@ -134,6 +134,11 @@ class Resolver:
                 raise BindingError([{'loc': ['body'], 'msg': 'Invalid JSON', 'type': 'json_invalid'}])
         return self.payload
 
+    def rollback(self):
+        from sqlalchemy.orm import Session
+        for value in self.cache.values():
+            if isinstance(value,Session): value.rollback()
+
     def call(self, func, dependency=False):
         original = func
         if dependency and original in self.cache:
@@ -265,10 +270,13 @@ def url_patterns(routers):
                         result = TypeAdapter(model).validate_python(result, from_attributes=True)
                     return JsonResponse(serialize(result), safe=False, status=code)
             except HTTPException as exc:
+                resolver.rollback()
                 return JsonResponse({'detail': exc.detail}, status=exc.status_code, headers=exc.headers)
             except BindingError as exc:
+                resolver.rollback()
                 return JsonResponse({'error_code': 'VALIDATION_ERROR', 'detail': 'Invalid request parameters', 'errors': exc.errors}, status=422)
             except Exception as exc:
+                resolver.rollback()
                 from app.core.exceptions import APIException
                 if isinstance(exc, APIException):
                     return JsonResponse({'error_code': exc.error_code, 'detail': exc.detail}, status=exc.status_code)

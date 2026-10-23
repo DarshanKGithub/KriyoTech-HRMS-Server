@@ -122,7 +122,7 @@ def set_leave_policy(payload: LeavePolicy, user: User = Depends(require_permissi
 
 @router.put('/leave-balances')
 def allocate_balance(payload: OpeningBalance, user: User = Depends(require_permissions('manage_org')), db: Session = Depends(get_db)):
-    employee = db.scalar(select(Employee).where(Employee.id == payload.employee_id))
+    employee = db.scalar(select(Employee).where(Employee.id == payload.employee_id).with_for_update(of=Employee))
     kind = db.scalar(select(LeaveType).where(LeaveType.id == payload.leave_type_id))
     if not employee or not kind:
         raise HTTPException(404, 'Employee or leave type not found')

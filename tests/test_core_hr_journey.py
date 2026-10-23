@@ -85,6 +85,7 @@ def test_inactive_tenant_and_expired_or_disabled_modules_are_rejected(api):
 def test_company_setup_leave_approval_and_payroll_pdf_journey(api):
     client,db=api
     assert client.put('/org/settings',headers=auth('a-owner'),json={'timezone':'Asia/Kolkata','working_days':[0,1,2,3,4]}).status_code==200
+    assert client.get('/auth/me',headers=auth('a-owner')).json()['tenant']['timezone']=='Asia/Kolkata'
     assert client.post('/org/departments',headers=auth('a-owner'),json={'name':'Engineering'}).status_code==200
     policy=client.post('/org/leave-types',headers=auth('a-hr'),json={'name':'Annual leave','default_days_per_year':10,'is_paid':True})
     assert policy.status_code==200,policy.content
@@ -169,6 +170,7 @@ def test_half_day_leave_overlap_rejection_and_pending_dashboard(api):
 def test_verified_payment_replay_and_amount_mismatch(api,monkeypatch):
     client,db=api
     db.info.pop('actor',None)
+    db.get(Plan,'plan').billing_period='3-month'
     db.add(Subscription(id='pending',tenant_id='a',plan_id='plan',starts_at=date.today(),status='pending_payment',price_paid_cents=1000,external_order_id='order_test'))
     db.commit()
     monkeypatch.setattr(settings,'razorpay_webhook_secret','local-test-secret')
@@ -180,6 +182,7 @@ def test_verified_payment_replay_and_amount_mismatch(api,monkeypatch):
     assert send(1).status_code==400
     assert send(1000).status_code==200
     end=db.get(Subscription,'pending').ends_at
+    assert end==date.today()+timedelta(days=90)
     assert send(1000).status_code==200
     assert db.get(Subscription,'pending').ends_at==end
     assert client.patch('/admin/users/a-employee/tenant?tenant_id=b',headers=auth('platform')).status_code==409
@@ -204,3 +207,30 @@ def test_correction_preserves_half_days_and_blocks_foreign_links(api):
     rows=client.get('/attendance/?employee_id=a-employee&start_date=2026-09-03&end_date=2026-09-03',headers=auth('a-hr'))
     assert rows.status_code==200,rows.content
     assert rows.json()['items'][0]['is_half_day'] is True
+
+
+def test_legacy_payment_confirmation_requires_captured_matching_order(api,monkeypatch):
+    client,db=api
+    db.info.pop('actor',None)
+    from app.db.models import PlanFeature
+    db.add(PlanFeature(plan_id='plan',feature_key='payroll_module',is_included=True))
+    feature=db.scalar(select(TenantFeature).where(TenantFeature.tenant_id=='a',TenantFeature.feature_key=='payroll_module'))
+    feature.enabled=False
+    db.add(Subscription(id='legacy-pending',tenant_id='a',plan_id='plan',starts_at=date.today(),status='pending_payment',price_paid_cents=1000,external_order_id='legacy-order'))
+    db.commit()
+    payment={'order_id':'legacy-order','status':'authorized','amount':1000,'currency':'INR'}
+    from types import SimpleNamespace
+    import app.api.routes.admin as admin
+    provider=SimpleNamespace(utility=SimpleNamespace(verify_payment_signature=lambda _:None),payment=SimpleNamespace(fetch=lambda _:payment))
+    monkeypatch.setattr(admin.razorpay,'Client',lambda **_:provider)
+    monkeypatch.setattr(settings,'razorpay_key_id','test-key')
+    monkeypatch.setattr(settings,'razorpay_key_secret','test-secret')
+    payload={'razorpay_order_id':'legacy-order','razorpay_payment_id':'payment','razorpay_signature':'verified-by-test-provider'}
+    assert client.post('/admin/subscriptions/verify-payment',headers=auth('a-hr'),json=payload).status_code==403
+    assert client.post('/admin/subscriptions/verify-payment',headers=auth('platform'),json=payload).status_code==400
+    payment['status']='captured'
+    verified=client.post('/admin/subscriptions/verify-payment',headers=auth('platform'),json=payload)
+    assert verified.status_code==200,verified.content
+    assert db.get(Subscription,'legacy-pending').status=='active'
+    assert db.scalar(select(TenantFeature).where(TenantFeature.tenant_id=='a',TenantFeature.feature_key=='payroll_module')).enabled is True
+    assert client.post('/admin/subscriptions/verify-payment',headers=auth('platform'),json=payload).status_code==200

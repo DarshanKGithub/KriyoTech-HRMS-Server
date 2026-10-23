@@ -19,7 +19,7 @@ PERMISSIONS = {
     'workflow': ('manage_workflows',), 'financials': ('view_payroll', 'view_payslip_own', 'approve_expenses'),
     'performance': ('view_performance', 'view_performance_own', 'view_performance_team'),
 }
-PUBLIC = {'/auth/login', '/auth/register', '/billing/webhook', '/api/webhooks/stripe', '/api/webhooks/razorpay'}
+PUBLIC = {'/auth/login', '/auth/register', '/auth/forgot-password', '/auth/reset-password', '/auth/accept-invitation', '/billing/webhook', '/api/webhooks/stripe', '/api/webhooks/razorpay'}
 
 def enforce(request, resolver, handler):
     path = request.path.rstrip('/')

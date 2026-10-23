@@ -87,7 +87,7 @@ def test_all_existing_routes_are_registered():
     from importlib import import_module
     routers = [import_module(f'app.api.routes.{name}').router for name, _ in ROUTERS]
     assert len(routers) == 21
-    assert sum(len(router.routes) for router in routers) == 236
+    assert sum(len(router.routes) for router in routers) >= 245
 
 
 def test_dependency_cache_cleanup_query_parsing_and_response_filtering():

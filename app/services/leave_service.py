@@ -57,7 +57,7 @@ def create_leave_request(employee_id: str, payload, db: Session, tenant_id: str 
     emp_query = db.query(Employee).filter(Employee.id == employee_id)
     if tenant_id:
         emp_query = emp_query.filter(Employee.tenant_id == tenant_id)
-    emp = emp_query.first()
+    emp = emp_query.with_for_update(of=Employee).first()
     if not emp:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Employee not found')
 
@@ -106,6 +106,9 @@ def create_leave_request(employee_id: str, payload, db: Session, tenant_id: str 
         status='pending_manager' if emp.manager_id else 'pending_hr',
     )
     db.add(lr)
+    from app.services.workflow_notifications import notify_employee
+    notify_employee(db,employee_id,'leave_requested','A leave request is awaiting review.',roles=('HR','Admin','CEO') if not emp.manager_id else ())
+    if emp.manager_id: notify_employee(db,emp.manager_id,'leave_requested','A direct report has requested leave.')
     db.commit()
     db.refresh(lr)
 
@@ -155,6 +158,7 @@ def list_leave_requests(db: Session, tenant_id: str | None = None, employee_id: 
 
 
 def _get_or_create_balance(employee_id: str, leave_type_id: str, year: int, db: Session) -> LeaveBalance:
+    db.scalar(select(Employee).where(Employee.id == employee_id).with_for_update(of=Employee))
     bal = db.query(LeaveBalance).filter(LeaveBalance.employee_id == employee_id, LeaveBalance.leave_type_id == leave_type_id, LeaveBalance.year == year).with_for_update().first()
     if bal:
         return bal
@@ -195,11 +199,22 @@ def approve_leave(leave_id: str, approver_id: str, approve: bool, db: Session, t
             lr.status = 'pending_hr'
             lr.updated_at = datetime.now()
             db.add(lr)
+            from app.services.workflow_notifications import notify_employee
+            notify_employee(db,lr.employee_id,'leave_'+lr.status,'Your leave request is now '+lr.status+'.')
+            if lr.status=='pending_hr': notify_employee(db,lr.employee_id,'leave_review_required','A leave request needs final HR review.',roles=('HR','Admin','CEO'))
             db.commit()
             db.refresh(lr)
         elif lr.status == 'pending_hr':
             if user.role not in ['HR', 'Admin', 'CEO']:
                 raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail='Only HR or Admin can finally approve')
+
+            from app.db.models import Payslip
+            first = lr.start_date.year * 12 + lr.start_date.month
+            last = lr.end_date.year * 12 + lr.end_date.month
+            if db.scalar(select(Payslip.id).where(Payslip.employee_id == lr.employee_id,
+                    (Payslip.year * 12 + Payslip.month) >= first,
+                    (Payslip.year * 12 + Payslip.month) <= last)):
+                raise HTTPException(409, 'Payroll already exists for this period. Review payroll before approving leave.')
 
             year = lr.start_date.year
             bal = _get_or_create_balance(lr.employee_id, lr.leave_type_id, year, db)
@@ -208,6 +223,7 @@ def approve_leave(leave_id: str, approver_id: str, approve: bool, db: Session, t
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Insufficient leave balance')
             if kind.is_paid:
                 bal.balance_days -= lr.days_requested
+                lr.deducted_days = lr.days_requested
             bal.updated_at = datetime.now()
             lr.status = 'approved'
             lr.approver_id = approver_id
@@ -215,6 +231,9 @@ def approve_leave(leave_id: str, approver_id: str, approve: bool, db: Session, t
             lr.updated_at = datetime.now()
             db.add(bal)
             db.add(lr)
+            from app.services.workflow_notifications import notify_employee
+            notify_employee(db,lr.employee_id,'leave_'+lr.status,'Your leave request is now '+lr.status+'.')
+            if lr.status=='pending_hr': notify_employee(db,lr.employee_id,'leave_review_required','A leave request needs final HR review.',roles=('HR','Admin','CEO'))
             db.commit()
             db.refresh(lr)
     else:
@@ -223,6 +242,8 @@ def approve_leave(leave_id: str, approver_id: str, approve: bool, db: Session, t
         lr.approved_at = datetime.now()
         lr.updated_at = datetime.now()
         db.add(lr)
+        from app.services.workflow_notifications import notify_employee
+        notify_employee(db,lr.employee_id,'leave_rejected','Your leave request was rejected.')
         db.commit()
         db.refresh(lr)
 
@@ -306,3 +327,39 @@ def delete_holiday(holiday_id: str, db: Session, tenant_id: str | None = None) -
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Holiday not found')
     db.delete(holiday)
     db.commit()
+
+
+def cancel_leave(leave_id,user,db):
+    from decimal import Decimal
+    from sqlalchemy import or_,and_
+    from app.db.models import Payslip
+    from app.core.business_time import business_today
+    from app.services.auth_service import resolve_employee_id
+    from app.services.workflow_notifications import notify_employee
+    request=db.scalar(select(LeaveRequest).where(LeaveRequest.id==leave_id).with_for_update(of=LeaveRequest).execution_options(populate_existing=True))
+    if not request: raise HTTPException(404,'Leave request not found')
+    own=request.employee_id==resolve_employee_id(user,db)
+    hr=user.role in {'HR','Admin','CEO'}
+    if not own and not hr: raise HTTPException(403,'Only the requester or HR can cancel leave')
+    if request.status=='cancelled': return request
+    if request.status not in {'pending','pending_manager','pending_hr','approved'}:
+        raise HTTPException(409,'This leave cannot be cancelled')
+    if request.status=='approved':
+        if not hr and request.start_date<business_today(db,user.tenant_id):
+            raise HTTPException(403,'Contact HR to reverse past approved leave')
+        first=request.start_date.year*12+request.start_date.month
+        last=request.end_date.year*12+request.end_date.month
+        payroll=db.scalar(select(Payslip.id).where(Payslip.employee_id==request.employee_id,(Payslip.year*12+Payslip.month)>=first,(Payslip.year*12+Payslip.month)<=last))
+        if payroll: raise HTTPException(409,'Payroll already exists for this period. Review payroll before reversing leave.')
+        if request.deducted_days is None:
+            raise HTTPException(409,'Historical leave deduction requires HR review before reversal')
+        if request.deducted_days:
+            balance=_get_or_create_balance(request.employee_id,request.leave_type_id,request.start_date.year,db)
+            balance.balance_days=min(Decimal(str(balance.granted_days)),Decimal(str(balance.balance_days))+Decimal(str(request.deducted_days)))
+        request.deducted_days=0
+    request.status='cancelled'
+    request.updated_at=datetime.now()
+    notify_employee(db,request.employee_id,'leave_cancelled','Your leave request has been cancelled. Any deducted balance has been restored.')
+    db.add(AuditLog(actor_id=user.id,action='cancel',object_type='leave_request',object_id=request.id,data='Balance reversal applied once'))
+    db.commit();db.refresh(request)
+    return request

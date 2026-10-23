@@ -1,3 +1,4 @@
+from app.services.workflow_notifications import notify_employee
 from sqlalchemy.orm import Session
 from sqlalchemy import desc
 from typing import Tuple, List, Optional
@@ -11,6 +12,7 @@ from app.services.notification_service import NotificationService
 def create_ticket(payload: HelpdeskTicketCreate, db: Session) -> HelpdeskTicket:
     ticket = HelpdeskTicket(**payload.model_dump())
     db.add(ticket)
+    notify_employee(db,ticket.employee_id,'ticket_created','Your support ticket has been opened.')
     db.commit()
     db.refresh(ticket)
     return ticket
@@ -37,10 +39,13 @@ def update_ticket_status(ticket_id: str, new_status: str, assigned_to: str, db: 
     if not ticket:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Ticket not found")
     
+    if new_status not in {'Open','In Progress','Resolved','Closed'}:
+        raise HTTPException(422,'Invalid helpdesk status')
     ticket.status = new_status
     if assigned_to:
         ticket.assigned_to = assigned_to
         
+    notify_employee(db,ticket.employee_id,'ticket_updated','Your support ticket is now '+new_status+'.')
     db.commit()
     db.refresh(ticket)
     return ticket
@@ -51,19 +56,9 @@ def create_announcement(payload: AnnouncementCreate, db: Session) -> Announcemen
     db.commit()
     db.refresh(ann)
     
-    # Broadcast announcement
-    employees = db.query(Employee).filter(Employee.is_active == True).all()
-    emp_ids = [e.id for e in employees]
-    if emp_ids:
-        NotificationService.send_bulk_notifications(
-            db=db,
-            recipient_ids=emp_ids,
-            event_type="announcement",
-            channel="in_app",
-            subject=f"New Announcement: {ann.title}",
-            message=ann.content
-        )
-    
+    for employee in db.query(Employee).filter(Employee.is_active.is_(True)):
+        notify_employee(db,employee.id,'announcement',ann.title+': '+ann.content)
+    db.commit()
     return ann
 
 def get_announcements(

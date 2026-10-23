@@ -1,4 +1,4 @@
-from app.http import Router, Depends, File, HTTPException, UploadFile, status
+from app.http import Router, Depends, File, HTTPException, UploadFile, status, Request
 from app.http import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
@@ -33,8 +33,16 @@ security = HTTPBearer(auto_error=False)
 
 
 @router.post('/login', response_model=LoginResponse)
-def login(payload: LoginRequest, db: Session = Depends(get_db)) -> LoginResponse:
+def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)) -> LoginResponse:
+    from app.services.account_service import throttle
+    from app.core.config import settings
+    throttle(db,'login-ip:'+request.META.get('REMOTE_ADDR','unknown'),50,settings.login_window_minutes)
+    throttle(db,'login-email:'+payload.email.strip().lower(),settings.login_attempt_limit,settings.login_window_minutes)
     user = authenticate_user(email=payload.email, password=payload.password, role=payload.role, db=db)
+    from sqlalchemy import delete
+    from hashlib import sha256
+    from app.db.models import AuthRateLimit
+    db.execute(delete(AuthRateLimit.__table__).where(AuthRateLimit.id==sha256(('login-email:'+payload.email.strip().lower()).encode()).hexdigest()))
     return create_login_response(user, db=db)
 
 
@@ -122,3 +130,69 @@ def get_me_permissions(
     user = get_user_from_token(credentials.credentials, db=db)
     permissions = list(get_permissions_for_role(user.role))
     return PermissionsResponse(role=user.role, permissions=permissions)
+
+
+from pydantic import BaseModel, Field
+from app.core.rbac import get_current_user, require_permissions
+from app.services import account_service
+from sqlalchemy import select
+from app.db.models import AuthSession
+from datetime import datetime, timezone
+
+class RecoveryRequest(BaseModel):
+    email: str = Field(min_length=3,max_length=255)
+class CompleteAccount(BaseModel):
+    token: str = Field(min_length=20,max_length=200)
+    password: str = Field(min_length=8,max_length=128)
+class InvitationRequest(BaseModel):
+    employee_id: str
+
+@router.post('/forgot-password')
+def forgot_password(payload: RecoveryRequest, request: Request, db: Session = Depends(get_db)):
+    account_service.throttle(db,'reset-ip:'+request.META.get('REMOTE_ADDR','unknown'),20)
+    account_service.throttle(db,'reset-email:'+payload.email.strip().lower(),3)
+    return account_service.request_reset(payload.email,db)
+
+@router.post('/reset-password')
+def reset_password(payload: CompleteAccount, request: Request, db: Session = Depends(get_db)):
+    account_service.throttle(db,'complete-ip:'+request.META.get('REMOTE_ADDR','unknown'),20)
+    return account_service.complete_link(payload.token,payload.password,'reset',db)
+
+@router.post('/accept-invitation')
+def accept_invitation(payload: CompleteAccount, request: Request, db: Session = Depends(get_db)):
+    account_service.throttle(db,'invite-complete-ip:'+request.META.get('REMOTE_ADDR','unknown'),20)
+    return account_service.complete_link(payload.token,payload.password,'invite',db)
+
+@router.post('/invitations')
+def send_invitation(payload: InvitationRequest, user=Depends(require_permissions('create_employee')), db: Session = Depends(get_db)):
+    account_service.throttle(db,'invite-actor:'+user.id,20)
+    return account_service.invite(payload.employee_id,user,db)
+
+@router.get('/sessions')
+def list_sessions(user=Depends(get_current_user), db: Session = Depends(get_db)):
+    rows=db.scalars(select(AuthSession).where(AuthSession.user_id==user.id,AuthSession.revoked_at.is_(None),AuthSession.expires_at>datetime.now(timezone.utc)).order_by(AuthSession.created_at.desc()))
+    return [{'id':row.id,'created_at':row.created_at.isoformat(),'expires_at':row.expires_at.isoformat()} for row in rows]
+
+@router.post('/sessions/{session_id}/revoke')
+def revoke_session(session_id: str, user=Depends(get_current_user), db: Session = Depends(get_db)):
+    row=db.scalar(select(AuthSession).where(AuthSession.id==session_id,AuthSession.user_id==user.id).with_for_update(of=AuthSession))
+    if not row: raise HTTPException(404,'Session not found')
+    row.revoked_at=datetime.now(timezone.utc);db.commit()
+    return {'message':'Session revoked'}
+
+@router.post('/sessions/revoke-all')
+def revoke_all_sessions(user=Depends(get_current_user), db: Session = Depends(get_db)):
+    account_service.revoke_all(user,db);db.commit()
+    return {'message':'All sessions revoked. Please sign in again.'}
+
+@router.post('/logout')
+def logout(credentials: HTTPAuthorizationCredentials = Depends(security), user=Depends(get_current_user), db: Session = Depends(get_db)):
+    from app.services.auth_service import decode_token_payload
+    payload=decode_token_payload(credentials.credentials)
+    if payload.get('sid'):
+        row=db.scalar(select(AuthSession).where(AuthSession.id==payload['sid'],AuthSession.user_id==user.id))
+        if row: row.revoked_at=datetime.now(timezone.utc)
+    else:
+        account_service.revoke_all(user,db)
+    db.commit()
+    return {'message':'Signed out'}

@@ -132,3 +132,7 @@ def list_loans(
             
     items = query.order_by(EmployeeLoan.created_at.desc()).all()
     return [EmployeeLoanPublic.model_validate(i, from_attributes=True) for i in items]
+
+
+from app.api.routes.tax_declarations import mount as mount_tax_declarations
+mount_tax_declarations(router)

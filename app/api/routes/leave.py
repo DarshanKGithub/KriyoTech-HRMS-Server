@@ -460,3 +460,9 @@ def get_leave_history(
         })
         
     return history
+
+
+@router.post('/requests/{request_id}/cancel',response_model=LeaveRequestPublic)
+def cancel_request_endpoint(request_id: str,user: User = Depends(get_current_user),db: Session = Depends(get_db)):
+    from app.services.leave_service import cancel_leave
+    return LeaveRequestPublic.model_validate(cancel_leave(request_id,user,db),from_attributes=True)

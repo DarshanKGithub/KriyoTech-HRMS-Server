@@ -18,6 +18,8 @@ class User(Base):
     role: Mapped[str] = mapped_column(String(50), index=True, nullable=False)
     tenant_id: Mapped[str] = mapped_column(String(36), ForeignKey('tenants.id'), nullable=True, index=True)
     # relationship to Tenant added later (Tenant class defined below)
+    auth_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    email_verified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(
@@ -606,6 +608,7 @@ class LeaveRequest(Base):
     session_from: Mapped[str] = mapped_column(String(50), nullable=True, default='Session 1')
     session_to: Mapped[str] = mapped_column(String(50), nullable=True, default='Session 2')
     days_requested: Mapped[float] = mapped_column(Numeric(6, 2), nullable=False)
+    deducted_days: Mapped[float | None] = mapped_column(Numeric(6,2), nullable=True, default=0)
     reason: Mapped[str] = mapped_column(String(1000), nullable=True)
     contact_details: Mapped[str] = mapped_column(String(500), nullable=True)
     cc_to: Mapped[str] = mapped_column(String(1000), nullable=True)  # JSON array of emails
@@ -1311,8 +1314,61 @@ class WorkflowInstance(Base):
 
 # Every business row has explicit ownership, including roots such as jobs/forms.
 # Global product catalog and tenant registry are platform-owned.
+# Account security records are durable across workers and restarts.
+class TaxDeclaration(Base):
+    __tablename__ = 'tax_declarations'
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    employee_id: Mapped[str] = mapped_column(ForeignKey('employees.id'), nullable=False, index=True)
+    financial_year: Mapped[int] = mapped_column(Integer, nullable=False)
+    category: Mapped[str] = mapped_column(String(120), nullable=False)
+    declared_amount: Mapped[float] = mapped_column(Numeric(12,2), nullable=False)
+    approved_amount: Mapped[float | None] = mapped_column(Numeric(12,2), nullable=True)
+    proof_document_id: Mapped[str | None] = mapped_column(ForeignKey('employee_documents.id'), nullable=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default='Draft')
+    review_note: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    reviewer_id: Mapped[str | None] = mapped_column(ForeignKey('users.id'), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda:datetime.now(timezone.utc), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda:datetime.now(timezone.utc), nullable=False)
+
+class AuthSession(Base):
+    __tablename__ = 'auth_sessions'
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    user_id: Mapped[str] = mapped_column(ForeignKey('users.id'), nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+class AccountToken(Base):
+    __tablename__ = 'account_tokens'
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    user_id: Mapped[str] = mapped_column(ForeignKey('users.id'), nullable=False, index=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    purpose: Mapped[str] = mapped_column(String(16), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    auth_version: Mapped[int] = mapped_column(Integer, nullable=False)
+
+class AuthRateLimit(Base):
+    __tablename__ = 'auth_rate_limits'
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    window_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+class MailMessage(Base):
+    __tablename__ = 'mail_messages'
+    notification_id: Mapped[str | None] = mapped_column(ForeignKey('notifications.id'),nullable=True)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    recipient: Mapped[str] = mapped_column(String(255), nullable=False)
+    subject: Mapped[str] = mapped_column(String(255), nullable=False)
+    encrypted_body: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default='queued', nullable=False)
+    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
 from sqlalchemy import Column, UniqueConstraint
-GLOBAL_TABLES = {'tenants', 'plans', 'plan_features', 'feature_packages', 'feature_package_features'}
+GLOBAL_TABLES = {'tenants', 'plans', 'plan_features', 'feature_packages', 'feature_package_features', 'auth_rate_limits'}
 TENANT_MODELS = []
 for _mapper in list(Base.registry.mappers):
     _model = _mapper.class_
